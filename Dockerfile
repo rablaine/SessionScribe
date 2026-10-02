@@ -26,9 +26,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY public ./public
-RUN mkdir -p /data && chown node:node /data
-USER node
-ENV HOST=0.0.0.0 \
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh && mkdir -p /data && chown node:node /data
+# Starts as root only to fix ownership of the mounted volume, then drops to the unprivileged node user.
+ENV HOME=/home/node \
+    HOST=0.0.0.0 \
     PORT=3000 \
     DATA_DIR=/data \
     FFMPEG_PATH=/usr/bin/ffmpeg \
@@ -37,5 +39,5 @@ ENV HOST=0.0.0.0 \
     YAMNET_MODEL_PATH=/app/detector/models/yamnet \
     LAUGHTER_DETECTOR_SCRIPT=/app/detector/detect_laughter.py
 EXPOSE 3000
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/server.js"]

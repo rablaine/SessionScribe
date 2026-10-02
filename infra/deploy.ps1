@@ -37,8 +37,23 @@ $image = "$loginServer/session-scribe:$Tag"
 if (-not $SkipBuild) {
     Write-Host "Building $image in ACR (context honors .dockerignore; .env, .secrets, data are never uploaded)..."
     Push-Location $project
-    try { AzRun acr build --subscription $sub --registry $registry --image "session-scribe:$Tag" --file Dockerfile . | Out-Host }
-    finally { Pop-Location }
+    try {
+        # Log streaming in az crashes on non-UTF-8 consoles, so queue the build and poll its status instead.
+        $run = AzRun acr build --subscription $sub --registry $registry --image "session-scribe:$Tag" --file Dockerfile . --no-logs -o json | Out-String | ConvertFrom-Json
+    } finally { Pop-Location }
+    do {
+        Start-Sleep -Seconds 20
+        $status = AzRun acr task show-run --subscription $sub --registry $registry --run-id $run.runId --query status -o tsv
+        Write-Host "  build $($run.runId): $status"
+    } while ($status -in @("Queued", "Started", "Running"))
+    if ($status -ne "Succeeded") {
+        $registryId = AzRun acr show --subscription $sub -g $rg -n $registry --query id -o tsv
+        $logUrl = AzRun rest --method post --url "https://management.azure.com$registryId/runs/$($run.runId)/listLogSasUrl?api-version=2019-06-01-preview" --query logLink -o tsv
+        $logFile = Join-Path ([IO.Path]::GetTempPath()) "session-scribe-build-$($run.runId).log"
+        Invoke-WebRequest -Uri $logUrl -OutFile $logFile -UseBasicParsing
+        Get-Content $logFile -Tail 40 | Out-Host
+        throw "Image build $($run.runId) finished with status $status. Full log: $logFile"
+    }
 }
 
 $identity = AzRun identity show --subscription $sub -g $rg -n id-session-scribe -o json | Out-String | ConvertFrom-Json
@@ -96,9 +111,7 @@ $spec = [ordered]@{
             # Exactly one replica: SQLite and the in-process job queue assume a single writer.
             scale = @{ minReplicas = 1; maxReplicas = 1 }
             volumes = @(@{
-                name = "data"; storageType = "AzureFile"; storageName = "sessiondata"
-                # nobrl: SQLite byte-range locks stay local; the app's instance lock guarantees one writer.
-                mountOptions = "uid=1000,gid=1000,dir_mode=0750,file_mode=0640,nobrl,mfsymlinks,cache=strict"
+                name = "data"; storageType = "NfsAzureFile"; storageName = "sessiondata"
             })
         }
     }

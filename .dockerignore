@@ -10,3 +10,4 @@
 !detector/download_model.py
 detector/models
 detector/__pycache__
+!docker-entrypoint.sh

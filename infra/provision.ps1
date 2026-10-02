@@ -22,7 +22,7 @@ $s = $cfg.nameSuffix
 $names = @{
     identity  = "id-session-scribe"
     registry  = "acrsessionscribe$s"
-    storage   = "stscribedata$s"
+    storage   = "stscribenfs$s"
     share     = "session-data"
     logs      = "log-session-scribe"
     env       = "cae-session-scribe-$s"
@@ -78,23 +78,25 @@ if (-not (AzExists acr show --subscription $sub -g $rg -n $names.registry)) {
 }
 $registryId = AzRun acr show --subscription $sub -g $rg -n $names.registry --query id -o tsv
 
-Write-Host "Persistent file storage (private endpoint only)"
+Write-Host "Persistent NFS file share (private endpoint only, no account keys)"
 if (-not (AzExists storage account show --subscription $sub -g $rg -n $names.storage)) {
-    # Container Apps SMB mounts authenticate with the account key, so shared-key auth stays enabled,
-    # but the account has no public network path: only the private endpoint in the app VNet reaches it.
-    AzRun storage account create --subscription $sub -g $rg -n $names.storage -l $loc --kind StorageV2 --sku Standard_LRS `
-        --min-tls-version TLS1_2 --https-only true --allow-blob-public-access false --allow-shared-key-access true `
+    # NFS 4.1 Azure Files authenticates by network location, not keys: the account has no public
+    # endpoint and is reachable only through the private endpoint in the app VNet. NFS requires the
+    # "secure transfer" (HTTPS-only) flag off; traffic stays on the private network.
+    AzRun storage account create --subscription $sub -g $rg -n $names.storage -l $loc --kind FileStorage --sku Premium_LRS `
+        --min-tls-version TLS1_2 --https-only false --allow-blob-public-access false --allow-shared-key-access false `
         --public-network-access Disabled --default-action Deny --bypass None -o none
 }
 $storageId = AzRun storage account show --subscription $sub -g $rg -n $names.storage --query id -o tsv
 if (-not (AzExists storage share-rm show --subscription $sub --storage-account $names.storage -g $rg -n $names.share)) {
     AzRun storage share-rm create --subscription $sub --storage-account $names.storage -g $rg -n $names.share `
-        --quota 100 --access-tier TransactionOptimized -o none
+        --quota 100 --enabled-protocols NFS --root-squash NoRootSquash -o none
 }
-AzRun storage account file-service-properties update --subscription $sub --account-name $names.storage -g $rg `
-    --enable-delete-retention true --delete-retention-days 14 -o none
+& az storage account file-service-properties update --subscription $sub --account-name $names.storage -g $rg `
+    --enable-delete-retention true --delete-retention-days 14 -o none --only-show-errors 2>$null
+if ($LASTEXITCODE -ne 0) { Write-Warning "File share soft delete could not be enabled; continuing." }
 
-Ensure-PrivateEndpoint "pe-session-scribe-files" $storageId "file" "privatelink.file.core.windows.net"
+Ensure-PrivateEndpoint "pe-session-scribe-nfs" $storageId "file" "privatelink.file.core.windows.net"
 
 Write-Host "Private endpoint to the Speech-input Blob account"
 $blobAccountId = AzRun storage account show --subscription $sub -g $cfg.blob.resourceGroup -n $cfg.blob.accountName --query id -o tsv
@@ -125,11 +127,9 @@ if (-not (AzExists containerapp env show --subscription $sub -g $rg -n $names.en
         --infrastructure-subnet-resource-id $appSubnetId --internal-only false `
         --logs-destination log-analytics --logs-workspace-id $workspaceId --logs-workspace-key $workspaceKey -o none
 }
-$storageKey = AzRun storage account keys list --subscription $sub -g $rg -n $names.storage --query "[0].value" -o tsv
 AzRun containerapp env storage set --subscription $sub -g $rg -n $names.env --storage-name $names.envStore `
-    --storage-type AzureFile --azure-file-account-name $names.storage --azure-file-account-key $storageKey `
-    --azure-file-share-name $names.share --access-mode ReadWrite -o none
-$storageKey = $null
+    --storage-type NfsAzureFile --server "$($names.storage).file.core.windows.net" `
+    --file-share "/$($names.storage)/$($names.share)" --access-mode ReadWrite -o none
 
 $domain = AzRun containerapp env show --subscription $sub -g $rg -n $names.env --query properties.defaultDomain -o tsv
 Write-Host ""
