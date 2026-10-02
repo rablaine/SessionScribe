@@ -105,7 +105,7 @@ test("account session cookies, normalization, password policy, rotation, CSRF an
   try {
     const anonymous = await f.request("/auth/session");
     assert.equal(anonymous.headers.get("cache-control"), "no-store");
-    assert.deepEqual(await anonymous.json(), { user: null, csrfToken: null, setupRequired: false });
+    assert.deepEqual(await anonymous.json(), { user: null, csrfToken: null, setupRequired: false, openSignup: true });
     const response = await f.request("/auth/login", "POST", { email: ` ${fixtureEmail.toUpperCase()} `, password: fixturePassword });
     assert.equal(response.status, 200);
     const cookie = response.headers.get("set-cookie")!;
@@ -351,7 +351,7 @@ test("SQLite hashes credentials, survives restart, persists limits/whitelist/own
 test("login throttling is explicit and durable across account instances", async () => {
   const f = await fixture();
   try {
-    for (let attempt = 0; attempt < 12; attempt++) {
+    for (let attempt = 0; attempt < 10; attempt++) {
       assert.equal((await f.request("/auth/login", "POST", { email: "throttled@example.test", password })).status, 401);
     }
     assert.equal((await f.request("/auth/login", "POST", { email: "throttled@example.test", password })).status, 429);

@@ -70,7 +70,8 @@ export class LaughterDetector implements LaughterDetection {
           return;
         }
         if (code !== 0) {
-          reject(new Error(stderr.trim() || `Laughter detector exited with code ${code}.`));
+          console.error(`Laughter detector exited with code ${code}: ${stderr.trim()}`);
+          reject(new Error("Laughter detection failed. The server log has details."));
           return;
         }
         try {

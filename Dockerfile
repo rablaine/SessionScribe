@@ -1,0 +1,41 @@
+# Session Scribe: web app, FFmpeg, and YAMNet laughter detector in one image.
+FROM node:24-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci --no-audit --no-fund
+COPY src ./src
+RUN npm run build && npm prune --omit=dev
+
+FROM node:24-bookworm-slim
+ENV NODE_ENV=production \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg python3 python3-venv ca-certificates tini \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY detector/requirements.txt detector/requirements.txt
+RUN python3 -m venv /opt/detector \
+ && /opt/detector/bin/pip install -r detector/requirements.txt
+COPY detector ./detector
+# Model is downloaded and SHA-256 verified at build time, never at runtime.
+RUN /opt/detector/bin/python detector/download_model.py --destination detector/models/yamnet \
+ && rm -rf detector/__pycache__
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY package.json ./
+COPY public ./public
+RUN mkdir -p /data && chown node:node /data
+USER node
+ENV HOST=0.0.0.0 \
+    PORT=3000 \
+    DATA_DIR=/data \
+    FFMPEG_PATH=/usr/bin/ffmpeg \
+    FFPROBE_PATH=/usr/bin/ffprobe \
+    PYTHON_PATH=/opt/detector/bin/python \
+    YAMNET_MODEL_PATH=/app/detector/models/yamnet \
+    LAUGHTER_DETECTOR_SCRIPT=/app/detector/detect_laughter.py
+EXPOSE 3000
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "dist/server.js"]

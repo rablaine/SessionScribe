@@ -1,57 +1,58 @@
 import express, { type Request, type Response, type NextFunction } from "express";
-import multer from "multer";
-import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import { config, readiness } from "./config.js";
 import { createDemo } from "./demo.js";
-import { displaySpeaker, jobSchema, publicJob, recapMarkdown, transcriptMarkdown, transcriptSrt, transcriptText } from "./domain.js";
+import { displaySpeaker, publicJob, transcriptCharacters, recordingAvailable, recordingState, recapMarkdown, transcriptMarkdown, transcriptSrt, transcriptText } from "./domain.js";
 import { activeStatuses, JobRunner } from "./runner.js";
 import { JobStore } from "./store.js";
 import { AzureSpeech } from "./azure.js";
 import { clipFilename, extractAudioClip, recordingFormat } from "./audio.js";
-import { Accounts } from "./accounts.js";
+import { AccountError, Accounts } from "./accounts.js";
+import { uploadErrorStatus, Uploads } from "./uploads.js";
+import { fileURLToPath } from "node:url";
 import { Waveforms } from "./waveform.js";
 
-const uploadFields = z.object({
-  title: z.string().trim().min(1).max(200),
-  locale: z.string().regex(/^[a-z]{2,3}-[A-Z]{2}$/).default("en-US"),
-  maxSpeakers: z.coerce.number().int().min(2).max(35).default(8),
-  context: z.string().max(6000).default(""),
-  consent: z.literal("true"),
-});
+const publicDirectory = fileURLToPath(new URL("../public/", import.meta.url));
 
 export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts) {
   const app = express();
   app.disable("x-powered-by");
+  // Behind exactly N trusted proxies req.ip is the client address they observed; spoofed entries further left are ignored.
+  if (config.trustProxyHops) app.set("trust proxy", config.trustProxyHops);
+  const publicUrl = config.publicOrigin ? new URL(config.publicOrigin) : undefined;
   app.use((req, res, next) => {
     const host = req.get("host");
     const origin = req.get("origin");
-    if (!host || (origin && origin !== `http://${host}` && origin !== `https://${host}`) ||
-        req.get("sec-fetch-site") === "cross-site") {
+    const hostAllowed = !!host && (publicUrl ? host.toLowerCase() === publicUrl.host :
+      /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(host));
+    if (!hostAllowed) {
+      res.status(403).json({ error: publicUrl ? "Unknown host." : "Public hosting is not enabled. This service currently accepts localhost requests only." });
+      return;
+    }
+    const expectedOrigins = publicUrl ? [publicUrl.origin] : [`http://${host}`, `https://${host}`];
+    if ((origin && !expectedOrigins.includes(origin)) || req.get("sec-fetch-site") === "cross-site") {
       res.status(403).json({ error: "Cross-origin requests are not allowed." });
       return;
     }
-    if (!/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(host)) {
-      res.status(403).json({ error: "Public hosting is not enabled. This service currently accepts localhost requests only." });
-      return;
-    }
     res.set({
-      "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
       "X-Content-Type-Options": "nosniff",
       "Referrer-Policy": "no-referrer",
+      "Cross-Origin-Opener-Policy": "same-origin",
+      ...(publicUrl?.protocol === "https:" ? { "Strict-Transport-Security": "max-age=31536000" } : {}),
     });
     next();
   });
-  app.use(express.json({ limit: "64kb" }));
   app.use("/api", (_req, res, next) => {
     res.set("Cache-Control", "no-store");
     next();
   });
   app.use(accounts.sessionMiddleware);
   app.use("/api", accounts.router);
+  app.use(express.json({ limit: "64kb" }));
   app.use("/api", accounts.requireActive);
   app.use("/api/jobs/:id", (req, res, next) => {
     if (!accounts.ownsJob(accounts.userId(req), req.params.id!)) {
@@ -64,7 +65,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
   app.get("/api/jobs/:id/waveform", async (req, res) => {
     const job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
-    if (!job.audioRetained || !job.durationMs) {
+    if (!recordingAvailable(job) || !job.durationMs) {
       res.status(409).json({ error: "A retained recording with a known duration is required for a waveform." }); return;
     }
     const window = z.object({
@@ -91,12 +92,19 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
   app.get("/api/jobs/:id/audio", (req, res, next) => {
     const job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
-    if (!job.audioRetained) {
-      res.status(404).json({ error: "No retained recording is available. Older recordings were deleted after processing; upload the recording again for playback." });
+    if (!recordingAvailable(job)) {
+      const expired = recordingState(job) === "expired";
+      res.status(expired ? 410 : 404).json({ error: expired
+        ? "This recording was removed after its retention period. The transcript and recap are still available."
+        : "No retained recording is available. Older recordings were deleted after processing; upload the recording again for playback." });
       return;
     }
     res.set("Cache-Control", "no-store");
     res.type(recordingFormat(job.originalName) === "opus" ? "audio/ogg" : "audio/mpeg");
+    if (req.query.download === "1") {
+      const extension = recordingFormat(job.originalName) === "opus" ? path.extname(job.originalName).toLowerCase() : ".mp3";
+      res.attachment(clipFilename(job.title || "recording", job.id).replace(/\.mp3$/, extension));
+    }
     res.sendFile(path.resolve(store.audioPath(job.id)), { acceptRanges: true, cacheControl: false }, error => {
       if (error) next(error);
     });
@@ -112,12 +120,14 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       res.status(503).json({ error: "Laughter detection is disabled on this server." }); return;
     }
     if (job.demo) { res.status(400).json({ error: "The fictional demo has no recording to analyze." }); return; }
-    if (!job.audioRetained || !job.durationMs) {
+    if (!recordingAvailable(job) || !job.durationMs) {
       res.status(409).json({ error: "A retained recording with a known duration is required." }); return;
     }
     if (runner.busyIds.has(job.id)) {
       res.status(409).json({ error: "This session is already processing." }); return;
     }
+    accounts.consumeQuota(accounts.userId(req), "laughter", 1, config.quotas.laughter,
+      `Daily laughter-detection limit reached (${config.quotas.laughter} per 24 hours). Try again later.`);
     job = await store.save({ ...job, laughter: { ...job.laughter, status: "queued", error: undefined } });
     runner.enqueueLaughter(job.id);
     res.status(202).json(publicJob(job));
@@ -133,7 +143,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       const job = store.get(req.params.id!);
       if (!job) { res.status(404).json({ error: "Session not found." }); return; }
       const range = clipRange.parse(req.body);
-      if (!job.audioRetained || !job.durationMs || !Number.isFinite(job.durationMs)) {
+      if (!recordingAvailable(job) || !job.durationMs || !Number.isFinite(job.durationMs)) {
         res.status(409).json({ error: "A retained recording with a known duration is required to create clips." }); return;
       }
       if (range.endMs > job.durationMs) {
@@ -154,7 +164,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     const job = store.get(req.params.id!);
     const clip = accounts.clip(req.params.id!, req.params.clipId!);
     if (!job || !clip) { res.status(404).json({ error: "Clip not found." }); return; }
-    if (!job.audioRetained) { res.status(410).json({ error: "Original recording unavailable. The saved clip range is kept, but cannot be exported." }); return; }
+    if (!recordingAvailable(job)) { res.status(410).json({ error: "Original recording unavailable. The saved clip range is kept, but cannot be exported." }); return; }
     if (clipExports >= 2 || exportingJobs.has(job.id)) {
       res.status(429).json({ error: "A clip export is already running. Wait and try again." }); return;
     }
@@ -188,64 +198,8 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     }
   });
 
-  const upload = multer({
-    storage: multer.diskStorage({
-      destination: (req, _file, callback) => {
-        const id = resUploadId(req);
-        const directory = store.directory(id);
-        mkdir(directory, { recursive: true }).then(
-          () => callback(null, directory),
-          error => callback(error instanceof Error ? error : new Error("Cannot create upload directory."), directory),
-        );
-      },
-      filename: (_req, _file, callback) => callback(null, "original.mp3"),
-    }),
-    limits: { fileSize: 500 * 1024 * 1024, files: 1, fields: 6, fieldSize: 8000, parts: 7 },
-    fileFilter: (_req, file, callback) => {
-      if (!recordingFormat(file.originalname)) callback(new Error("Only MP3 and Ogg Opus (.opus or .ogg) uploads are supported."));
-      else callback(null, true);
-    },
-  }).single("audio");
-
-  app.post("/api/jobs", (req, res, next) => {
-    if (readiness().transcriptionMissing.length) {
-      res.status(503).json({ error: `Configure ${readiness().transcriptionMissing.join(", ")} before uploading.` });
-      return;
-    }
-    if (runner.busyIds.size >= 5) {
-      res.status(429).json({ error: "The local queue is full. Wait for a session to finish." });
-      return;
-    }
-    upload(req, res, error => {
-      void (async () => {
-        const id = resUploadId(req);
-        try {
-          if (error) throw error;
-          const fields = uploadFields.parse(req.body);
-          if (!req.file || !req.file.size) throw new Error("Select a non-empty MP3 or Ogg Opus file.");
-          const ownerId = accounts.userId(req);
-          if (!accounts.isActiveUser(ownerId)) throw new Error("Your account no longer has access. The recording was not accepted.");
-          if (runner.busyIds.size >= 5) throw new Error("The local queue filled while uploading. Wait for a session to finish.");
-          const now = new Date().toISOString();
-          accounts.assignJob(id, ownerId);
-          const job = await store.save(jobSchema.parse({
-            id, title: fields.title, originalName: path.basename(req.file.originalname),
-            audioRetained: true,
-            createdAt: now, updatedAt: now, status: "queued", stage: "Waiting in the local queue",
-            locale: fields.locale, maxSpeakers: fields.maxSpeakers, context: fields.context,
-          }));
-          runner.enqueue(id);
-          res.status(202).json(publicJob(job));
-        } catch (failure) {
-          if (!store.get(id)) {
-            accounts.releaseJob(id);
-            await rm(store.directory(id), { recursive: true, force: true });
-          }
-          res.status(400).json({ error: failure instanceof z.ZodError ? "Invalid upload fields. Check title, language, speaker count, and recording consent." : failure instanceof Error ? failure.message : "Upload failed." });
-        }
-      })().catch(next);
-    });
-  });
+  const uploads = new Uploads(store, runner, accounts);
+  uploads.register(app);
   app.patch("/api/jobs/:id/speakers", async (req, res) => {
     const job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
@@ -307,6 +261,9 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       return;
     }
     const speakerNames = Object.fromEntries([...knownSpeakers].map(speaker => [speaker, displaySpeaker(job, speaker)]));
+    if (transcriptCharacters({ ...job, segments }) > Math.max(config.recapMaxTranscriptChars, transcriptCharacters(job))) {
+      res.status(413).json({ error: "These edits would make the transcript too long to summarize." }); return;
+    }
     const updated = await store.save({
       ...job, segments, speakerNames, recapStale: Boolean(job.recap), error: undefined, status: "transcript_ready",
       stage: !segments.length ? "All transcript entries deleted. Original recording and saved recap kept."
@@ -322,6 +279,11 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     if (!job.segments.length) { res.status(409).json({ error: "A transcript is required first." }); return; }
     if (runner.busyIds.has(job.id)) { res.status(409).json({ error: "Session is already processing." }); return; }
     if (readiness().recapMissing.length) { res.status(503).json({ error: `Configure ${readiness().recapMissing.join(", ")} first.` }); return; }
+    if (transcriptCharacters(job) > config.recapMaxTranscriptChars) {
+      res.status(413).json({ error: `This transcript is too long for a recap (limit ${config.recapMaxTranscriptChars.toLocaleString("en-US")} characters).` }); return;
+    }
+    accounts.consumeQuota(accounts.userId(req), "recap", 1, config.quotas.recaps,
+      `Daily recap limit reached (${config.quotas.recaps} per 24 hours). Try again later.`);
     await store.save({ ...job, status: "queued", stage: "Recap queued", error: undefined });
     runner.enqueue(job.id);
     res.status(202).json({ id: job.id });
@@ -352,9 +314,11 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     accounts.releaseJob(job.id);
     res.status(204).end();
   });
-  app.use(express.static(path.resolve("public")));
+  app.use(express.static(publicDirectory));
   app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
     if (res.headersSent) { next(error); return; }
+    const known = error instanceof AccountError ? { status: error.status, message: error.message } : uploadErrorStatus(error);
+    if (known) { res.status(known.status).json({ error: known.message }); return; }
     const status = error instanceof z.ZodError ? 400 :
       error instanceof Error && "code" in error && error.code === "ENOENT" ? 404 :
       error instanceof Error && "status" in error && typeof error.status === "number" &&
@@ -372,14 +336,8 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     }
     res.status(status).type("application/json").json({ error: message });
   });
+  app.locals.isRecordingBusy = (id: string) =>
+    runner.busyIds.has(id) || exportingJobs.has(id) || waveforms.isGenerating(id);
+  app.locals.uploads = uploads;
   return app;
-}
-
-function resUploadId(req: Request): string {
-  const existing = req.res?.locals.uploadId;
-  if (typeof existing === "string") return existing;
-  const id = randomUUID();
-  if (!req.res) throw new Error("Upload response is unavailable.");
-  req.res.locals.uploadId = id;
-  return id;
 }

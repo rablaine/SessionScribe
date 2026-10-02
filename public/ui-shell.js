@@ -2,7 +2,6 @@
   "use strict";
   const byId = id => document.getElementById(id);
   const importDialog = byId("import-dialog");
-  const previewDialog = byId("preview-dialog");
   let importBusy = false;
   let currentSession = null;
 
@@ -73,16 +72,54 @@
     });
   }
 
-  function setRecordingState({ available, demo }) {
-    byId("recording-state").textContent = demo ? "Fictional demo · no recording" :
-      available ? "Stored on this device" : "Unavailable";
-    byId("recording-detail").textContent = demo ?
-      "No audio was recorded or processed for this demo. References navigate its fictional transcript." :
-      available ?
-        "The local original remains on this device until you delete the session. Use playback controls or transcript timestamps to review it. Planned 30-day retention is not active." :
-        "No local original is available for playback. The transcript and saved recap can still be reviewed. Current originals remain until session deletion; planned 30-day retention is not active.";
-  }
+  const DAY = 86_400_000;
+  const dateText = value => new Date(value).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 
+  function setRecordingState(job) {
+    const state = byId("recording-state");
+    const detail = byId("recording-detail");
+    const footnote = byId("recording-footnote");
+    const download = byId("recording-download");
+    download.hidden = true;
+    download.removeAttribute("href");
+    state.classList.remove("expiring");
+    footnote.textContent = "";
+    if (!job) {
+      state.textContent = "No session selected";
+      detail.textContent = "Select a session to check whether its original recording is available.";
+      return;
+    }
+    const recording = job.recordingState;
+    if (recording === "none") {
+      state.textContent = "Fictional demo · no recording";
+      detail.textContent = "No audio was recorded or processed for this demo. References navigate its fictional transcript.";
+      return;
+    }
+    if (recording === "available") {
+      download.href = `/api/jobs/${encodeURIComponent(job.id)}/audio?download=1`;
+      download.hidden = false;
+      if (!job.recordingExpiresAt) {
+        state.textContent = "Available";
+        detail.textContent = "The original is kept until you delete this session.";
+        return;
+      }
+      const remaining = Math.max(0, Math.ceil((Date.parse(job.recordingExpiresAt) - Date.now()) / DAY));
+      const soon = remaining <= 7;
+      state.textContent = soon ? `Expiring soon · ${remaining} day${remaining === 1 ? "" : "s"} left` : `Available · ${remaining} days left`;
+      state.classList.toggle("expiring", soon);
+      detail.textContent = `Uploaded ${dateText(job.recordingUploadedAt || job.createdAt)}. Playback, waveform and clip export are available until ${dateText(job.recordingExpiresAt)}.` +
+        (soon ? " Download the original or export the clips you want to keep before then." : "");
+      footnote.textContent = "Originals are deleted automatically after the retention period. Transcripts, recaps, speaker names and saved clip ranges stay until you delete the session. Editing or playing does not extend the deadline.";
+      return;
+    }
+    if (recording === "expired") {
+      state.textContent = "Recording removed";
+      detail.textContent = "This recording was removed after its retention period. Your transcript and recap are still available; saved clip ranges are kept but can no longer be played or exported.";
+      return;
+    }
+    state.textContent = "Unavailable";
+    detail.textContent = "No original recording is stored for this session (older versions deleted it after processing). The transcript and saved recap can still be reviewed; upload the recording again as a new session for playback.";
+  }
   document.querySelectorAll("[data-open-import]").forEach(button => {
     button.addEventListener("click", () => {
       if (!window.SessionScribeAuth?.canAccessWorkspace()) return;
@@ -101,52 +138,6 @@
     if (event.key !== "Escape" || !importDialog.open) return;
     event.preventDefault();
     if (!importBusy) closeImport();
-  });
-
-  const previewTabs = [...document.querySelectorAll("[data-preview-tab]")];
-  function closePreview() {
-    if (previewDialog.open) previewDialog.close();
-  }
-  function selectPreview(name, focus = false) {
-    const selected = previewTabs.some(tab => tab.dataset.previewTab === name) ? name : "recordings";
-    previewTabs.forEach(tab => {
-      const active = tab.dataset.previewTab === selected;
-      tab.classList.toggle("active", active);
-      tab.setAttribute("aria-selected", String(active));
-      tab.tabIndex = active ? 0 : -1;
-      byId(tab.getAttribute("aria-controls")).hidden = !active;
-      if (active && focus) tab.focus();
-    });
-  }
-  document.querySelectorAll("[data-open-preview]").forEach(button => {
-    button.addEventListener("click", () => {
-      selectPreview(button.dataset.openPreview);
-      if (!previewDialog.open) previewDialog.showModal();
-    });
-  });
-  document.querySelectorAll("[data-close-preview]").forEach(button => {
-    button.addEventListener("click", closePreview);
-  });
-  previewDialog.addEventListener("keydown", event => {
-    if (event.key !== "Escape" || !previewDialog.open) return;
-    event.preventDefault();
-    closePreview();
-  });
-  previewTabs.forEach((tab, index) => {
-    tab.addEventListener("click", () => selectPreview(tab.dataset.previewTab));
-    tab.addEventListener("keydown", event => {
-      let next;
-      if (event.key === "ArrowRight") next = (index + 1) % previewTabs.length;
-      else if (event.key === "ArrowLeft") next = (index - 1 + previewTabs.length) % previewTabs.length;
-      else if (event.key === "Home") next = 0;
-      else if (event.key === "End") next = previewTabs.length - 1;
-      else return;
-      event.preventDefault();
-      selectPreview(previewTabs[next].dataset.previewTab, true);
-    });
-  });
-  previewDialog.querySelectorAll("form").forEach(form => {
-    form.addEventListener("submit", event => event.preventDefault());
   });
 
   const themeToggle = byId("theme-toggle");

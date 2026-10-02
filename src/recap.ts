@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { config } from "./config.js";
 import { requestJson } from "./http.js";
-import { displaySpeaker, type Job, type Recap } from "./domain.js";
+import { displaySpeaker, transcriptCharacters, type Job, type Recap } from "./domain.js";
 import { cognitiveHeaders } from "./auth.js";
 
 const MAX_SOURCE_CHARS = 18_000;
@@ -167,6 +167,9 @@ export async function generateRecap(
   onProgress: (stage: string) => Promise<void>,
   call: RecapCaller = callAzure,
 ): Promise<Recap> {
+  if (transcriptCharacters(job) > config.recapMaxTranscriptChars) {
+    throw new Error(`This transcript is too long for a recap (limit ${config.recapMaxTranscriptChars.toLocaleString("en-US")} characters).`);
+  }
   if (!job.segments.length) throw new Error("Cannot summarize an empty transcript.");
   const segments = [...job.segments].sort((a, b) => a.startMs - b.startMs);
   const lines = segments.map(segment => {

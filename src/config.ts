@@ -31,6 +31,19 @@ const env = z.object({
   LAUGHTER_HIGH_THRESHOLD: z.coerce.number().min(0).max(1).default(0.15),
   LAUGHTER_LOW_THRESHOLD: z.coerce.number().min(0).max(1).default(0.05),
   LAUGHTER_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(240).default(60),
+  // Number of reverse proxies in front of Node whose X-Forwarded-For entry is trusted (Container Apps ingress: 1).
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(3).default(0),
+  // WAL needs shared memory and is unsafe on SMB/NFS shares; use DELETE when DATA_DIR is a network mount.
+  SQLITE_JOURNAL_MODE: z.enum(["WAL", "DELETE", "TRUNCATE"]).default("WAL"),
+  // Self-service access requests create pending accounts. Off: only invitation links can register.
+  APP_OPEN_SIGNUP: z.enum(["true", "false"]).default("false"),
+  RECORDING_RETENTION_DAYS: z.coerce.number().int().min(0).max(3650).default(30),
+  DAILY_UPLOADS_PER_USER: z.coerce.number().int().min(1).max(1000).default(15),
+  DAILY_AUDIO_HOURS_PER_USER: z.coerce.number().min(1).max(1000).default(24),
+  DAILY_RECAPS_PER_USER: z.coerce.number().int().min(1).max(1000).default(30),
+  DAILY_LAUGHTER_RUNS_PER_USER: z.coerce.number().int().min(1).max(1000).default(15),
+  RECAP_MAX_TRANSCRIPT_CHARS: z.coerce.number().int().min(10_000).max(5_000_000).default(400_000),
+  MIN_FREE_DISK_MB: z.coerce.number().int().min(0).default(2048),
 }).parse(process.env);
 
 function endpoint(value: string, suffixes: string[]): string {
@@ -72,7 +85,27 @@ export const config = {
   laughterHighThreshold: env.LAUGHTER_HIGH_THRESHOLD,
   laughterLowThreshold: env.LAUGHTER_LOW_THRESHOLD,
   laughterTimeoutMs: env.LAUGHTER_TIMEOUT_MINUTES * 60_000,
+  trustProxyHops: env.TRUST_PROXY_HOPS,
+  sqliteJournalMode: env.SQLITE_JOURNAL_MODE,
+  openSignup: env.APP_OPEN_SIGNUP === "true",
+  retentionDays: env.RECORDING_RETENTION_DAYS,
+  quotas: {
+    uploads: env.DAILY_UPLOADS_PER_USER,
+    audioMs: env.DAILY_AUDIO_HOURS_PER_USER * 3_600_000,
+    recaps: env.DAILY_RECAPS_PER_USER,
+    laughter: env.DAILY_LAUGHTER_RUNS_PER_USER,
+  },
+  recapMaxTranscriptChars: env.RECAP_MAX_TRANSCRIPT_CHARS,
+  minFreeDiskBytes: env.MIN_FREE_DISK_MB * 1024 * 1024,
 };
+
+const loopbackHost = /^(localhost|127\.0\.0\.1|\[::1\]|::1)$/;
+if (!loopbackHost.test(config.host) && !config.publicOrigin) {
+  throw new Error("Binding to a non-loopback HOST requires APP_PUBLIC_ORIGIN (the exact public HTTPS origin).");
+}
+if (config.trustProxyHops && !config.publicOrigin) {
+  throw new Error("TRUST_PROXY_HOPS is only valid with APP_PUBLIC_ORIGIN behind a known reverse proxy.");
+}
 
 function applicationOrigin(value: string): string {
   const url = new URL(value);
@@ -108,6 +141,6 @@ export function readiness() {
   ].filter(Boolean);
   return {
     transcriptionMissing, recapMissing, authMode: config.authMode, maxUploadMB: 500, maxDurationHours: 4,
-    laughterDetectionEnabled: config.laughterEnabled,
+    laughterDetectionEnabled: config.laughterEnabled, retentionDays: config.retentionDays,
   };
 }

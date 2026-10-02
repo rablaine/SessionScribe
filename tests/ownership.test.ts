@@ -88,11 +88,10 @@ test("anonymous/pending requests and missing CSRF cannot read sessions or create
       assert.equal((await fetch(`${f.base}${url}`)).status, 401);
     }
     const before = await readdir(f.root);
-    const upload = new FormData();
-    upload.set("audio", new Blob(["must not be written"]), "recording.mp3");
-    upload.set("title", "Anonymous");
-    upload.set("consent", "true");
-    assert.equal((await fetch(`${f.base}/api/jobs`, { method: "POST", body: upload })).status, 401);
+    assert.equal((await fetch(`${f.base}/api/uploads`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Anonymous", consent: true, filename: "recording.mp3", size: 10 }),
+    })).status, 401);
     assert.equal((await fetch(`${f.base}/api/demo`, { method: "POST" })).status, 401);
     assert.deepEqual(await readdir(f.root), before);
     assert.equal((await fetch(`${f.base}/api/demo`, {

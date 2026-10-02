@@ -1,0 +1,12 @@
+# Allowlist: only what the image needs. Never send .env, .secrets, data, or .private to the build.
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!src/**
+!public/**
+!detector/requirements.txt
+!detector/detect_laughter.py
+!detector/download_model.py
+detector/models
+detector/__pycache__

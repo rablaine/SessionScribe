@@ -41,7 +41,10 @@ export function runTool(executable: string, args: string[], timeoutMs: number): 
     child.on("close", code => {
       clearTimeout(timer);
       if (timedOut) reject(new Error("Audio processing exceeded its time limit."));
-      else if (code !== 0) reject(new Error(`Audio processing failed (${code}): ${stderr}`));
+      else if (code !== 0) {
+        console.error(`Audio tool exited with code ${code}: ${stderr.trim()}`);
+        reject(new Error("Audio processing failed. The recording may be damaged or use an unsupported encoding."));
+      }
       else resolve(output);
     });
   });

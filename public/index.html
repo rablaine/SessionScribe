@@ -27,11 +27,7 @@
       <button id="admin-nav" class="nav-button" type="button" hidden>Access management</button>
       <div id="account-summary" class="account-summary" hidden><span class="nav-caption">Signed in as</span><strong id="account-email"></strong><button class="quiet" type="button" data-signout>Sign out</button><p id="account-error" class="error" role="alert" hidden></p></div>
       <div class="sidebar-bottom">
-        <p class="nav-caption">Future retention policy</p>
-        <nav class="preview-nav" aria-label="Not connected feature previews">
-          <button class="nav-button" type="button" data-open-preview="recordings">Recording lifecycle preview</button>
-        </nav>
-        <button class="quiet mobile-preview-button" type="button" data-open-preview="recordings">Retention preview</button>
+
         <button id="theme-toggle" class="quiet theme-toggle" type="button" aria-pressed="false">Dark appearance</button>
         <p class="sidebar-note">Your library is private to your account. Administrator access manages accounts, not other users' recordings.</p>
       </div>
@@ -59,8 +55,8 @@
           </section>
           <section id="signup-panel" class="auth-panel" role="tabpanel" aria-labelledby="signup-tab" hidden>
             <p id="invitation-notice" class="notice" hidden></p>
-            <p class="hint">Anyone may request an account. Ordinary signups stay pending until the administrator personally confirms identity and approves access. A valid invitation activates only its bound, whitelisted email.</p>
-            <form id="signup-form"><div id="signup-error" class="error" role="alert" hidden></div><label for="signup-email">Email<input id="signup-email" name="email" type="email" autocomplete="username" required maxlength="254"></label><label for="signup-password">Create a password<input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required aria-describedby="signup-password-help"></label><p id="signup-password-help" class="hint">Use a unique password with 8–128 characters. No special-character or composition rules are required.</p><label id="invitation-field" for="signup-invitation">Invitation token <span class="optional">optional</span><input id="signup-invitation" type="password" autocomplete="off" placeholder="Only if personally provided by the administrator"></label><button class="primary" type="submit">Create account / request access</button></form>
+            <p id="signup-hint" class="hint">Anyone may request an account. Ordinary signups stay pending until the administrator personally confirms identity and approves access. A valid invitation activates only its bound, whitelisted email.</p>
+            <form id="signup-form"><div id="signup-error" class="error" role="alert" hidden></div><label for="signup-email">Email<input id="signup-email" name="email" type="email" autocomplete="username" required maxlength="254"></label><label for="signup-password">Create a password<input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required aria-describedby="signup-password-help"></label><p id="signup-password-help" class="hint">Use a unique password with 8–128 characters. No special-character or composition rules are required.</p><label id="invitation-field" for="signup-invitation">Invitation token <span class="optional">optional</span><input id="signup-invitation" type="password" autocomplete="off" placeholder="Only if personally provided by the administrator"></label><button id="signup-submit" class="primary" type="submit">Create account / request access</button></form>
           </section>
           <section id="reset-panel" class="auth-panel" aria-labelledby="reset-heading" hidden>
             <h2 id="reset-heading">Choose a new password</h2><p class="hint">This one-use link resets your password. You will sign in afterwards; no automatic session is created.</p>
@@ -100,7 +96,7 @@
           </div>
           <div id="library-no-results" class="library-empty" hidden><h2>No matching sessions</h2><p>Try a different title or change the status filter to All sessions.</p></div>
         </section>
-        <p class="storage-note"><strong>Stored locally.</strong> Original recordings, transcripts, and recaps stay on this machine until you delete the session. Azure uses transient private processing blobs; temporary cloud audio is deleted after processing. Some older sessions may not have their original recording. No automatic 30-day local retention policy is active.</p>
+        <p id="storage-note" class="storage-note"><strong>Recording retention.</strong> Original recordings are kept for 30 days after upload for playback, waveforms and clip export, then deleted automatically. Transcripts, recaps, speaker names and saved clip ranges stay until you delete the session. Azure Speech only receives a temporary processing copy, deleted after transcription.</p>
       </section>
       <section class="session-panel" id="session-panel" aria-label="Session review" hidden>
         <div id="empty-state" class="empty-state card"><h2>No session selected</h2><p>Choose a session from your library to review its transcript and recap.</p></div>
@@ -136,8 +132,8 @@
               </section>
             </div>
             <aside class="review-inspector" aria-label="Session details">
-              <section class="inspector-card card" aria-labelledby="clips-heading"><h2 id="clips-heading">Audio clips</h2><p class="hint">Saved ranges use the original recording. Export an MP3 whenever you need it.</p><div id="clip-list" aria-live="polite"></div></section>
-              <section class="inspector-card card" aria-labelledby="recording-heading"><p class="eyebrow">Source recording</p><h2 id="recording-heading">Recording</h2><p id="recording-state" class="recording-state" role="status">No session selected</p><p id="recording-detail" class="hint">Select a session to check whether its original recording is available locally.</p><p class="inspector-footnote">Local originals remain until session deletion. A 30-day retention policy is not connected.</p></section>
+              <section class="inspector-card card" aria-labelledby="clips-heading"><h2 id="clips-heading">Audio clips</h2><p class="hint">Saved ranges use the original recording. Export the MP3s you want to keep before the recording expires; afterwards the ranges remain but cannot be played or exported.</p><div id="clip-list" aria-live="polite"></div></section>
+              <section class="inspector-card card" aria-labelledby="recording-heading"><p class="eyebrow">Source recording</p><h2 id="recording-heading">Recording</h2><p id="recording-state" class="recording-state" role="status">No session selected</p><p id="recording-detail" class="hint">Select a session to check whether its original recording is available.</p><a id="recording-download" class="button secondary compact" hidden>Download original</a><p id="recording-footnote" class="inspector-footnote"></p></section>
               <section id="speaker-panel" class="speaker-panel card" hidden>
                 <div class="section-heading"><h2>Speaker labels</h2><span class="small-label">Editable</span></div>
                 <p class="hint">Labels are guesses, not verified identities. Character voices can produce multiple labels for one person.</p>
@@ -172,7 +168,7 @@
       <label for="import-context">Campaign context <span class="optional">optional</span><textarea id="import-context" name="context" maxlength="6000" rows="3" placeholder="Character names, locations, spelling hints..."></textarea></label>
       <p class="hint">Context guides recap spelling only; it does not improve speech recognition or prove an event happened.</p>
       <label class="consent"><input name="consent" type="checkbox" value="true" required><span>Everyone recorded has agreed to recording and Azure processing.</span></label>
-      <p id="upload-help" class="hint" role="status">Azure processing is billable. Multi-hour batch jobs can take minutes to hours.</p>
+      <p id="retention-notice" class="hint"></p><p id="upload-help" class="hint" role="status">Azure processing is billable. Multi-hour batch jobs can take minutes to hours.</p>
       <p class="hint">Cancel closes this dialog without clearing your chosen file or entered details.</p>
       <div class="dialog-actions"><button class="secondary" type="button" data-close-import>Cancel</button><button id="upload-button" class="primary" type="submit">Transcribe session <span aria-hidden="true">→</span></button></div>
     </form>
@@ -218,22 +214,6 @@
       <p id="clip-status" class="hint" role="status"></p>
       <div class="dialog-actions"><button id="clip-save" class="secondary" type="submit">Save clip</button><button id="clip-export" class="primary" type="button">Save &amp; export MP3</button></div>
     </form>
-  </dialog>
-  <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title" aria-describedby="preview-warning">
-    <header class="dialog-heading"><div><p class="eyebrow">UI PREVIEW / NOT CONNECTED</p><h2 id="preview-title">Recording lifecycle preview</h2></div><button class="quiet" type="button" data-close-preview autofocus>Close preview</button></header>
-    <p id="preview-warning" class="preview-warning"><strong>Retention design only.</strong> No retention jobs run from this gallery. All recordings below are clearly marked samples. Account and administrator screens elsewhere are real, but this planned 30-day recording policy is not connected.</p>
-    <div class="tabs preview-tabs" role="tablist" aria-label="Feature preview gallery">
-      <button id="preview-recordings-tab" class="tab active" role="tab" aria-controls="preview-recordings-panel" aria-selected="true" data-preview-tab="recordings" type="button">Recording lifecycle</button>
-    </div>
-    <section id="preview-recordings-panel" class="preview-panel" role="tabpanel" aria-labelledby="preview-recordings-tab">
-      <p class="preview-context"><strong>SAMPLE · Planned 30-day recording lifecycle.</strong> This is a future policy illustration, not current storage behavior. No expiry or purge is scheduled. Actual local originals remain until deletion; private Azure audio blobs are transient processing copies.</p>
-      <div class="preview-grid lifecycle-grid">
-        <section class="preview-card"><span class="sample-label">SAMPLE · AVAILABLE</span><h3>Recording available</h3><p>Example: uploaded 5 days ago, 25 days remaining under a planned 30-day policy.</p><button class="secondary compact" type="button" disabled>Play sample recording</button></section>
-        <section class="preview-card"><span class="sample-label">SAMPLE · EXPIRING</span><h3>Recording expiring soon</h3><p>Example: uploaded 28 days ago, 2 days remaining under a planned 30-day policy.</p><button class="secondary compact" type="button" disabled>Download before expiry</button></section>
-        <section class="preview-card"><span class="sample-label">SAMPLE · PURGED</span><h3>Recording no longer retained</h3><p>Example: audio removed after the planned 30-day window. Transcript and recap would remain available.</p><button class="secondary compact" type="button" disabled>Playback unavailable</button></section>
-      </div>
-      <p class="hint">The future retention policy needs scheduled deletion and verified recording availability. These static examples do not change any session.</p>
-    </section>
   </dialog>
   <dialog id="admin-decision-dialog" aria-labelledby="admin-decision-title" aria-describedby="admin-decision-description">
     <h2 id="admin-decision-title">Confirm account access</h2><p id="admin-decision-description"></p>

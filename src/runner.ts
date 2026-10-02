@@ -2,7 +2,7 @@ import { rm } from "node:fs/promises";
 import { config, readiness } from "./config.js";
 import { inspectRecording, normalizeAudio } from "./audio.js";
 import { AzureSpeech } from "./azure.js";
-import type { Job } from "./domain.js";
+import { recordingAvailable, type Job } from "./domain.js";
 import { generateRecap } from "./recap.js";
 import { JobStore } from "./store.js";
 import { LaughterDetector, type LaughterDetection } from "./laughter.js";
@@ -14,7 +14,11 @@ type QueueItem = { id: string; operation: "process" | "laughter" };
 export class JobRunner {
   private queue: QueueItem[] = [];
   private running = false;
+  private stopped = false;
+  private criticalSections = 0;
   readonly busyIds = new Set<string>();
+  // Set by the server: queued work for suspended/removed owners must not keep spending Azure money.
+  canProcess: (id: string) => boolean = () => true;
   constructor(
     private store: JobStore,
     private speech = new AzureSpeech(),
@@ -45,11 +49,16 @@ export class JobRunner {
     return this.store.save({ ...current, ...patch });
   }
 
+  get inCriticalSection() { return this.criticalSections > 0; }
+
+  // Stop taking new work. In-flight work is abandoned at process exit and resumed from persisted state.
+  stop() { this.stopped = true; }
+
   private async drain() {
     if (this.running) return;
     this.running = true;
     try {
-      while (this.queue.length) {
+      while (this.queue.length && !this.stopped) {
         const { id, operation } = this.queue.shift()!;
         try {
           if (operation === "laughter") await this.processLaughter(id);
@@ -70,7 +79,7 @@ export class JobRunner {
         laughter: { status: "skipped", events: [], error: "Laughter detection is disabled." },
       });
     }
-    if (!job.audioRetained || !job.durationMs) {
+    if (!recordingAvailable(job) || !job.durationMs) {
       return this.update(job.id, {
         laughter: { status: "failed", events: [], error: "A retained recording with a known duration is required." },
       });
@@ -110,6 +119,7 @@ export class JobRunner {
   private async process(id: string) {
     let job = this.store.get(id)!;
     try {
+      if (!this.canProcess(id)) throw new Error("The session owner's account is no longer active, so processing stopped.");
       if (!job.segments.length) {
         if (readiness().transcriptionMissing.length) throw new Error("Azure Speech/Storage configuration is incomplete.");
         if (!job.speechJobUrl) {
@@ -119,8 +129,12 @@ export class JobRunner {
           await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id));
           job = await this.update(id, { status: "uploading", stage: "Uploading to private Azure Blob Storage", blobName: `${id}/mono.mp3` });
           const audioUrl = await this.speech.upload(this.store.monoPath(id), job.blobName!);
-          const speechJobUrl = await this.speech.submit(job, audioUrl);
-          job = await this.update(id, { speechJobUrl, status: "transcribing", stage: "Azure Speech job submitted" });
+          // Shutdown waits for this window so a submitted (billable) Speech job is never forgotten and resubmitted.
+          this.criticalSections++;
+          try {
+            const speechJobUrl = await this.speech.submit(job, audioUrl);
+            job = await this.update(id, { speechJobUrl, status: "transcribing", stage: "Azure Speech job submitted" });
+          } finally { this.criticalSections--; }
         }
         job = await this.detectLaughter(job, true);
         const result = await this.speech.waitForTranscript(job.speechJobUrl!, async status => {

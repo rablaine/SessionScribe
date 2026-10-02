@@ -1,6 +1,6 @@
 # Session Scribe
 
-A local browser MVP for recorded Dungeons & Dragons sessions. Upload an MP3 or Ogg Opus recording (`.opus` or `.ogg`), get a timestamped speaker-labelled transcript, rename speaker labels, and generate a chronological story recap. See [PLAN.md](PLAN.md) for feasibility and the Discord phase, and [PRODUCT-PLAN.md](PRODUCT-PLAN.md) for the application design, password accounts, administrator approval/whitelisting, per-user ownership, and proposed 30-day cloud recording retention.
+A private web app for recorded Dungeons & Dragons sessions. It runs locally for development and on Azure Container Apps for a small invited group. Upload an MP3 or Ogg Opus recording (`.opus` or `.ogg`), get a timestamped speaker-labelled transcript, rename speaker labels, and generate a chronological story recap. See [PLAN.md](PLAN.md) for feasibility and the Discord phase, and [PRODUCT-PLAN.md](PRODUCT-PLAN.md) for the application design, password accounts, administrator approval/whitelisting, per-user ownership, and 30-day recording retention. Hosting is described in [Hosting on Azure](#hosting-on-azure) and security posture in [SECURITY-REVIEW.md](SECURITY-REVIEW.md).
 
 ## What works
 
@@ -14,14 +14,15 @@ A local browser MVP for recorded Dungeons & Dragons sessions. Upload an MP3 or O
 - Local/worker-side YAMNet laughter detection with a timestamped laughter index. Each suggestion can seek the retained recording and open the existing clip editor around the reaction.
 - Downloads: JSON, timestamped TXT, SRT, transcript Markdown, and separate recap Markdown. Exports include saved corrections.
 - Audio clips: use **Clip** beside a transcript timestamp or recap reference. The custom player starts 30 seconds before and 20 seconds after that timestamp (clamped to the original recording). Drag Start/End handles on its highlighted timeline, click/drag the playhead to seek, and play/replay the selection. Boundaries update live without pausing playback; playback stops at the current end. The timeline opens zoomed around the selection; **Full recording** and **Zoom to selection** switch its scale. Handles support touch and keyboard (arrows 0.1s, Shift + arrows 1s, Page Up/Down 10s, Home/End limits). Numeric inputs remain for millisecond-precision edits. Save a range or save and export a 192 kbps MP3; saved clips appear in the session inspector for editing and repeat export.
-- Jobs/transcripts persist as local JSON. On restart, in-progress jobs resume; saved Azure job URLs are polled rather than resubmitted.
+- Jobs/transcripts persist as JSON under `DATA_DIR`. On restart, in-progress jobs resume; saved Azure job URLs are polled rather than resubmitted. An instance lock guarantees that only one process uses `DATA_DIR`; during a rolling deploy the new container waits for the old one to release it.
+- Uploads are sent in resumable 8 MiB chunks (`/api/uploads`), so no request runs long enough to hit proxy timeouts and a dropped connection resumes from the last confirmed byte. Recordings are checked with ffprobe before a session is created; invalid files are deleted immediately.
 - Transcripts survive recap failures. Recaps can be retried independently.
 - Fictional demo works without credentials and makes **no Azure calls**.
 - Consent required for real uploads; private temporary Azure blobs, SP/MSI authentication, Speech managed-identity reads, audio cleanup, explicit deletion, and cleanup warnings.
 
-**Public hosting is still disabled.** Password accounts and per-user API isolation are implemented, but public hostnames are deliberately rejected. Do not expose the local server through a public tunnel. HTTPS deployment, persistent storage, backups, billing limits, and capacity controls remain a separate hosting step. See the hosting gate in [PLAN.md](PLAN.md).
+**Public hosting is opt-in and exact.** With `APP_PUBLIC_ORIGIN` blank the server accepts only localhost Host headers. When it is set, only that exact HTTPS host is accepted, cookies become `Secure`/`__Host-`, HSTS is sent, and `TRUST_PROXY_HOPS` must match the real proxy chain. Signup is invitation-only by default (`APP_OPEN_SIGNUP=false`). Per-user daily quotas cap uploads, audio hours, recap generations and laughter runs.
 
-**Recording lifecycle previews remain disconnected.** Account screens now use real server APIs. The planned 30-day private Blob recording policy is still a preview, not an active retention job. Current originals remain local until session deletion.
+**30-day recording retention is active.** Each original recording gets a fixed expiry 30 days after its upload was accepted (`RECORDING_RETENTION_DAYS`). Playback, waveforms, clip preview/export and laughter re-runs stop at that moment even before the background sweep physically deletes the file, which happens within about ten minutes. Transcripts, recaps, speaker names, laughter timestamps and saved clip ranges stay until the session is deleted. Sessions accepted before retention existed use their creation time as the upload time. The inspector shows days remaining, warns during the last 7 days, and offers **Download original**.
 
 ## Accounts and administrator setup
 
@@ -226,6 +227,71 @@ Original recordings are now retained locally for playback, including failed jobs
 
 Playback uses your browser's native audio codecs. MP3 playback and timestamp navigation were verified in the embedded browser; real Ogg Opus playback and seeking were verified separately in standalone Chrome. The VS Code embedded browser used here could not decode Opus despite advertising codec support. If it reports unsupported audio, open the local app in Chrome rather than the embedded browser.
 
+## Hosting on Azure
+
+The hosted shape mirrors a small "one container + SQLite on a file share" app, with the extra
+protections this workload needs:
+
+```text
+Browser ──HTTPS──> Container Apps ingress (TLS, 1 trusted proxy hop)
+                     └─ one replica (1 vCPU / 2 GiB): Node app + FFmpeg + YAMNet
+                          ├─ /data  Azure Files share (SMB, private endpoint only)
+                          │         accounts.sqlite (rollback journal), job JSON, originals, backups/
+                          ├─ Blob (private endpoint) temporary mono audio for Speech
+                          └─ Azure AI Speech + Azure OpenAI via user-assigned managed identity
+```
+
+- **Exactly one replica** (`minReplicas = maxReplicas = 1`). SQLite and the in-process job queue assume
+  one writer; `.instance.lock` in `DATA_DIR` enforces it during deploys and restarts.
+- **No public storage.** The file share and the Speech-input Blob account are reachable only through
+  private endpoints in the app's dedicated VNet. The file share is mounted with its account key
+  (a Container Apps secret); the account itself has public network access disabled.
+- **No stored cloud credentials in the app.** Speech, OpenAI, Blob and image pulls use a user-assigned
+  managed identity with only AcrPull, Speech User, OpenAI User and container-scoped Blob Data Contributor.
+- **Backups.** Every day the app writes a consistent copy of `accounts.sqlite` (users, ownership,
+  clip ranges) to `/data/backups/`, keeping 14 days. File-share soft delete keeps a deleted share for
+  14 days. Recordings and transcripts are deliberately not copied into backups, so deleting a session
+  or expiring a recording is not undone by a hidden copy.
+
+### Provision (once)
+
+```powershell
+Copy-Item infra\deploy.example.json infra\deploy.local.json   # gitignored; fill in real names
+.\infra\provision.ps1
+```
+
+`provision.ps1` is re-runnable. It creates only app-specific resources in its own resource group
+(VNet, private endpoints, file storage, registry, Log Analytics, identity, Container Apps environment)
+plus the identity's role assignments. It does not change unrelated apps, plans or model deployments.
+
+### Deploy (manual, whenever you choose)
+
+```powershell
+.\infra\deploy.ps1                          # build image in ACR from the working tree, then roll out
+.\infra\deploy.ps1 -SkipBuild -Tag <tag>    # roll back/forward to an existing image tag
+```
+
+There is no CI/CD and nothing deploys on push. The build context is filtered by `.dockerignore`
+(an allowlist), so `.env`, `.secrets/`, `data/` and `.private/` never leave your machine.
+A rollout causes a few seconds of "starting" responses while the new replica takes the data lock.
+
+### First administrator in the cloud
+
+```powershell
+az containerapp exec -g <resource-group> -n session-scribe --command "node dist/account-cli.js --email you@example.com"
+```
+
+The CLI prompts for the password inside the container; it is never passed as an argument.
+
+### Restore the accounts database
+
+```powershell
+az containerapp exec -g <resource-group> -n session-scribe --command "cp /data/backups/accounts-YYYY-MM-DD.sqlite /data/restore-accounts.sqlite"
+az containerapp revision restart -g <resource-group> -n session-scribe --revision <active-revision>
+```
+
+On startup the app swaps `restore-accounts.sqlite` in once and keeps the previous database beside it
+with a `.before-restore-<timestamp>` suffix.
 ## Limits and failure behavior
 
 - Diarization is approximate: overlapping talk, music, mic sharing, and roleplayed voices can confuse labels. A label is not biometric identification, a character identity, or a cross-session identity.

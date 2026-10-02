@@ -50,7 +50,10 @@ export function decodePeaks(executable: string, input: string, durationMs: numbe
       clearTimeout(timer);
       if (frames && !failure) append();
       if (failure) reject(failure);
-      else if (code !== 0) reject(new Error(`Waveform generation failed (${code}): ${stderr}`));
+      else if (code !== 0) {
+        console.error(`Waveform FFmpeg exited with code ${code}: ${stderr.trim()}`);
+        reject(new Error("Waveform generation failed."));
+      }
       else if (!count || carry.length) reject(new Error("FFmpeg returned incomplete waveform audio."));
       else resolve(output.subarray(0, count * 2));
     });

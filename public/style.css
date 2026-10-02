@@ -434,3 +434,5 @@ td .sample-label { margin-left: 4px; }
 @media (prefers-reduced-motion: reduce) {
   .status-dot.busy { animation: none; }
 }
+.recording-state.expiring { color: var(--cp-danger); }
+#recording-download { margin-top: 4px; }

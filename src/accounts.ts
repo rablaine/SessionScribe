@@ -18,7 +18,13 @@ export interface AccountsOptions {
   databasePath: string;
   publicOrigin?: string;
   adminEmail?: string;
+  journalMode?: "WAL" | "DELETE" | "TRUNCATE";
+  // When false, only invitation links can create accounts; self-service access requests are refused.
+  openSignup?: boolean;
+  maxPendingAccounts?: number;
 }
+
+export type UsageKind = "upload" | "audio-ms" | "recap" | "laughter";
 
 export interface AudioClip {
   id: string;
@@ -32,7 +38,9 @@ export interface AudioClip {
 type UserRow = AccountUser & { password: string };
 type Session = { hash: string; csrf: string; user: AccountUser };
 type LinkRow = { hash: string; email: string; userId: string | null; expiresAt: number; usedAt: number | null };
-const COOKIE = "scribe_session";
+const LEGACY_COOKIE = "scribe_session";
+// The __Host- prefix forbids Domain/insecure cookies, so a sibling subdomain cannot plant a session.
+const SECURE_COOKIE = "__Host-scribe_session";
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const INVITE_MS = 72 * 60 * 60 * 1000;
 const RESET_MS = 60 * 60 * 1000;
@@ -52,6 +60,21 @@ const safe = (row: UserRow | AccountUser): AccountUser => ({
 
 class PublicError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
+}
+export { PublicError as AccountError };
+
+// Group IPv6 clients by /64 so one host cannot rotate through its whole allocation to evade limits.
+export function clientKey(ip: string | undefined): string {
+  if (!ip) return "unknown";
+  const address = ip.startsWith("::ffff:") && ip.includes(".") ? ip.slice(7) : ip;
+  if (!address.includes(":")) return address;
+  const [head = "", tail = ""] = address.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = address.includes("::")
+    ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right]
+    : left;
+  return `${groups.slice(0, 4).map(group => (group || "0").toLowerCase().replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }
 
 // This bound applies across Accounts instances, not just across requests on one router.
@@ -110,7 +133,10 @@ export class Accounts {
   private readonly contexts = new WeakMap<Request, Session>();
   private readonly origin?: string;
   private readonly secure: boolean;
+  private readonly cookie: string;
   private readonly reservedEmail?: string;
+  private readonly openSignup: boolean;
+  private readonly maxPending: number;
 
   constructor(options: AccountsOptions) {
     if (options.publicOrigin) {
@@ -122,12 +148,15 @@ export class Accounts {
       this.origin = url.origin;
     }
     this.secure = this.origin?.startsWith("https:") ?? false;
+    this.cookie = this.secure ? SECURE_COOKIE : LEGACY_COOKIE;
+    this.openSignup = options.openSignup ?? true;
+    this.maxPending = options.maxPendingAccounts ?? 25;
     this.reservedEmail = options.adminEmail ? emailSchema.parse(options.adminEmail) : undefined;
     mkdirSync(path.dirname(options.databasePath), { recursive: true });
     this.db = new DatabaseSync(options.databasePath);
-    this.db.exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;");
+    this.db.exec(`PRAGMA journal_mode=${options.journalMode ?? "WAL"}; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;`);
     const version = (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    if (version > 3) { this.db.close(); throw new Error("Unsupported accounts database version."); }
+    if (version > 4) { this.db.close(); throw new Error("Unsupported accounts database version."); }
     if (version === 0) this.db.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE users (
@@ -179,6 +208,16 @@ export class Accounts {
       PRAGMA user_version=3;
       COMMIT;
     `);
+    if (version < 4) this.db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE IF NOT EXISTS usage (
+        id INTEGER PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL, amount INTEGER NOT NULL, createdAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS usage_user ON usage(userId,kind,createdAt);
+      PRAGMA user_version=4;
+      COMMIT;
+    `);
     this.routes();
   }
 
@@ -206,20 +245,41 @@ export class Accounts {
   private setupRequired() { return !this.get("SELECT id FROM users WHERE role='admin' LIMIT 1"); }
 
   private rate(req: Request, scope: string, email?: string) {
-    const limits = scope === "login" ? [40, 12, 15 * 60 * 1000] :
-      scope === "register" ? [20, 8, 60 * 60 * 1000] :
-      scope === "reset" ? [30, 10, 60 * 60 * 1000] : [120, 120, 60 * 1000];
-    const now = Date.now();
+    const limits = scope === "login" ? [40, 15 * 60 * 1000] :
+      scope === "register" ? [20, 60 * 60 * 1000] :
+      scope === "reset" ? [30, 60 * 60 * 1000] : [120, 60 * 1000];
     this.transaction(() => {
-      this.run("DELETE FROM rate_limits WHERE expiresAt<=?", now);
-      for (const [key, limit] of [
-        [`${scope}:ip:${hash(req.ip ?? req.socket.remoteAddress ?? "unknown")}`, limits[0]!],
-        ...(email ? [[`${scope}:email:${hash(email)}`, limits[1]!] as const] : []),
-      ] as Array<readonly [string, number]>) {
-        const row = this.get<{ count: number }>("SELECT count FROM rate_limits WHERE key=?", key);
-        if (row && row.count >= limit) throw new PublicError(429, "Too many requests. Try again later.");
+      this.run("DELETE FROM rate_limits WHERE expiresAt<=?", Date.now());
+      this.hit(`${scope}:ip:${hash(clientKey(req.ip ?? req.socket.remoteAddress))}`, limits[0]!, limits[1]!);
+      // Registration without an invitation is also limited per address; invitation tokens are unguessable.
+      if (email) this.hit(`${scope}:email:${hash(email)}`, 8, limits[1]!);
+    });
+  }
+  private hit(key: string, limit: number, windowMs: number) {
+    const row = this.get<{ count: number }>("SELECT count FROM rate_limits WHERE key=? AND expiresAt>?", key, Date.now());
+    if (row && row.count >= limit) throw new PublicError(429, "Too many requests. Try again later.");
+    this.run(`INSERT INTO rate_limits(key,count,expiresAt) VALUES (?,1,?)
+      ON CONFLICT(key) DO UPDATE SET count=count+1`, key, Date.now() + windowMs);
+  }
+  // Only failed sign-ins count against an address. Keying on address+client means an attacker
+  // elsewhere cannot lock the real user out; the looser address-only bucket still caps distributed guessing.
+  private loginFailureKeys(req: Request, email: string) {
+    return [
+      [`login-fail:${hash(`${email}|${clientKey(req.ip ?? req.socket.remoteAddress)}`)}`, 10, 15 * 60 * 1000],
+      [`login-fail:${hash(email)}`, 50, 60 * 60 * 1000],
+    ] as const;
+  }
+  private checkLoginFailures(req: Request, email: string) {
+    for (const [key, limit] of this.loginFailureKeys(req, email)) {
+      const row = this.get<{ count: number }>("SELECT count FROM rate_limits WHERE key=? AND expiresAt>?", key, Date.now());
+      if (row && row.count >= limit) throw new PublicError(429, "Too many requests. Try again later.");
+    }
+  }
+  private recordLoginFailure(req: Request, email: string) {
+    this.transaction(() => {
+      for (const [key, , windowMs] of this.loginFailureKeys(req, email)) {
         this.run(`INSERT INTO rate_limits(key,count,expiresAt) VALUES (?,1,?)
-          ON CONFLICT(key) DO UPDATE SET count=count+1`, key, now + limits[2]!);
+          ON CONFLICT(key) DO UPDATE SET count=count+1`, key, Date.now() + windowMs);
       }
     });
   }
@@ -245,7 +305,7 @@ export class Accounts {
   sessionMiddleware: RequestHandler = (req, res, next) => {
     try {
       const cookies = (req.get("cookie") ?? "").split(";").map(value => value.trim());
-      const raw = cookies.find(value => value.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
+      const raw = cookies.find(value => value.startsWith(`${this.cookie}=`))?.slice(this.cookie.length + 1);
       if (raw && tokenSchema.safeParse(raw).success) {
         const session = this.get<{ hash: string; csrf: string; userId: string }>(
           "SELECT hash,csrf,userId FROM sessions WHERE hash=? AND expiresAt>?", hash(raw), Date.now());
@@ -326,6 +386,25 @@ export class Accounts {
   }
   close(): void { this.db.close(); }
 
+  // Consistent online copy for backups; works in WAL and rollback-journal modes.
+  backupTo(file: string): void {
+    this.db.prepare("VACUUM INTO ?").run(file);
+  }
+
+  usageSince(userId: string, kind: UsageKind, sinceMs: number): number {
+    return Number(this.get<{ total: number | null }>(
+      "SELECT SUM(amount) AS total FROM usage WHERE userId=? AND kind=? AND createdAt>?", userId, kind, sinceMs)?.total ?? 0);
+  }
+  // Atomically checks a rolling 24-hour allowance and records the new usage when it fits.
+  consumeQuota(userId: string, kind: UsageKind, amount: number, limit: number, message: string): void {
+    this.transaction(() => {
+      const now = Date.now();
+      this.run("DELETE FROM usage WHERE createdAt < ?", now - 2 * 24 * 60 * 60 * 1000);
+      if (this.usageSince(userId, kind, now - 24 * 60 * 60 * 1000) + amount > limit) throw new PublicError(429, message);
+      this.run("INSERT INTO usage(userId,kind,amount,createdAt) VALUES (?,?,?,?)", userId, kind, Math.round(amount), now);
+    });
+  }
+
   async bootstrapAdministrator(email: string, password: string): Promise<AccountUser> {
     email = emailSchema.parse(email);
     passwordSchema.parse(password);
@@ -350,7 +429,7 @@ export class Accounts {
       user.id, user.email, password, user.role, user.status, user.createdAt, user.verificationMethod);
   }
   private clearCookie(res: Response) {
-    res.clearCookie(COOKIE, { httpOnly: true, sameSite: "strict", secure: this.secure, path: "/" });
+    res.clearCookie(this.cookie, { httpOnly: true, sameSite: "strict", secure: this.secure, path: "/" });
   }
   private issueSession(req: Request, res: Response, user: AccountUser) {
     const raw = token(), csrfToken = token();
@@ -362,7 +441,7 @@ export class Accounts {
         hash(raw), user.id, csrfToken, Date.now() + SESSION_MS);
       this.audit("auth.session-issued", user.id);
     });
-    res.cookie(COOKIE, raw, { httpOnly: true, sameSite: "strict", secure: this.secure, path: "/", maxAge: SESSION_MS });
+    res.cookie(this.cookie, raw, { httpOnly: true, sameSite: "strict", secure: this.secure, path: "/", maxAge: SESSION_MS });
     return { user: safe(user), csrfToken };
   }
 
@@ -390,26 +469,33 @@ export class Accounts {
       const session = this.contexts.get(req);
       res.set("Cache-Control", "no-store").json({
         user: session?.user ?? null, csrfToken: session?.csrf ?? null, setupRequired: this.setupRequired(),
+        openSignup: this.openSignup,
       });
     });
     this.router.post("/auth/login", async (req, res) => {
       const parsed = credentialsSchema.safeParse(req.body);
-      this.rate(req, "login", parsed.success ? parsed.data.email : undefined);
+      this.rate(req, "login");
       if (!parsed.success) throw new PublicError(401, GENERIC_LOGIN);
       const { email, password } = parsed.data;
+      this.checkLoginFailures(req, email);
       const user = this.emailUser(email);
       const matches = await passwordMatches(password, user?.password);
       // Re-read after the asynchronous KDF: reset/suspension may have happened in flight.
       const current = user ? this.user(user.id) : undefined;
       if (!matches || !current || current.password !== user!.password ||
         !["active", "pending"].includes(current.status)) {
+        this.recordLoginFailure(req, email);
         throw new PublicError(401, GENERIC_LOGIN);
       }
       res.json(this.issueSession(req, res, current));
     });
     this.router.post("/auth/register", async (req, res) => {
       const parsed = signupSchema.safeParse(req.body);
-      this.rate(req, "register", parsed.success ? parsed.data.email : undefined);
+      const invited = parsed.success && !!parsed.data.invitationToken;
+      if (parsed.success && !invited && !this.openSignup) {
+        throw new PublicError(403, "Access is by invitation only. Ask the administrator for an invitation link.");
+      }
+      this.rate(req, "register", parsed.success && !invited ? parsed.data.email : undefined);
       if (!parsed.success) throw new PublicError(400, "Invalid registration details.");
       const { email, password, invitationToken } = parsed.data;
       const encoded = await passwordHash(password);
@@ -433,6 +519,11 @@ export class Accounts {
             return safe(this.user(existing.id)!);
           }
         } else if (existing) {
+          return null;
+        }
+        if (!invitationToken &&
+          (this.get<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE status='pending'")?.n ?? 0) >= this.maxPending) {
+          // Bounded queue of self-service requests: excess requests get the same generic response.
           return null;
         }
         const created: AccountUser = {

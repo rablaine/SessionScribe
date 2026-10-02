@@ -1,0 +1,33 @@
+{
+  "subscriptionId": "<subscription-guid>",
+  "location": "southcentralus",
+  "resourceGroup": "rg-session-scribe",
+  "nameSuffix": "<4-8 lowercase letters/digits, makes global names unique>",
+  "network": {
+    "vnetName": "vnet-session-scribe",
+    "addressPrefix": "10.84.0.0/16",
+    "appSubnetPrefix": "10.84.0.0/23",
+    "privateEndpointSubnetPrefix": "10.84.2.0/24"
+  },
+  "ai": {
+    "resourceGroup": "<ai-account-resource-group>",
+    "accountName": "<ai-account-name>",
+    "speechEndpoint": "https://<ai-account>.cognitiveservices.azure.com",
+    "openaiEndpoint": "https://<ai-account>.openai.azure.com",
+    "openaiDeployment": "session-scribe-recap",
+    "reasoningEffort": "low"
+  },
+  "blob": {
+    "resourceGroup": "<speech-input-storage-resource-group>",
+    "accountName": "<speech-input-storage-account>",
+    "container": "dnd-audio"
+  },
+  "app": {
+    "name": "session-scribe",
+    "cpu": 1.0,
+    "memory": "2Gi",
+    "adminEmail": "",
+    "publicOrigin": "",
+    "budgetMonthlyUsd": 75
+  }
+}

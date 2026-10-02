@@ -101,8 +101,31 @@ export const jobSchema = z.object({
   warnings: z.array(z.string()).default([]),
   speechJobUrl: z.string().optional(),
   blobName: z.string().optional(),
+  // Original-recording lifecycle. Expiry is fixed at acceptance; playback/editing never extend it.
+  recordingUploadedAt: z.string().optional(),
+  recordingExpiresAt: z.string().optional(),
+  recordingPurgedAt: z.string().optional(),
 });
 export type Job = z.infer<typeof jobSchema>;
+
+export type RecordingState = "available" | "expired" | "unavailable" | "none";
+
+export function recordingState(job: Job, now = Date.now()): RecordingState {
+  if (job.audioRetained) {
+    return job.recordingExpiresAt && Date.parse(job.recordingExpiresAt) <= now ? "expired" : "available";
+  }
+  if (job.demo) return "none";
+  return job.recordingPurgedAt ? "expired" : "unavailable";
+}
+
+// True only while the original may still be served or processed, even if physical purge is pending.
+export function recordingAvailable(job: Job, now = Date.now()): boolean {
+  return recordingState(job, now) === "available";
+}
+
+export function recordingExpiry(acceptedAt: string, retentionDays: number): string | undefined {
+  return retentionDays > 0 ? new Date(Date.parse(acceptedAt) + retentionDays * 86_400_000).toISOString() : undefined;
+}
 
 export function timestamp(ms: number): string {
   const seconds = Math.floor(ms / 1000);
@@ -154,9 +177,15 @@ export function displaySpeaker(job: Job, id: string): string {
   return job.speakerNames[id] || (id === "unknown" ? "Unknown" : `Speaker ${id.replace("speaker-", "")}`);
 }
 
+export function transcriptCharacters(job: Pick<Job, "segments">): number {
+  return job.segments.reduce((total, segment) => total + segment.text.length + segment.speaker.length + 32, 0);
+}
+
 export function publicJob(job: Job) {
   const { speechJobUrl, blobName, ...result } = job;
-  return result;
+  const state = recordingState(job);
+  // Once expired, report the recording as gone even if the background purge has not run yet.
+  return { ...result, audioRetained: state === "available", recordingState: state };
 }
 
 export function transcriptText(job: Job): string {

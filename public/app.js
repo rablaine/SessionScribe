@@ -52,7 +52,9 @@ function updatePlayer(job) {
     player.hidden = true;
     $("audio-playback-status").textContent = job?.demo ?
       "Fictional demo: no original recording exists." :
-      "Playback unavailable. Older recordings were already deleted; reupload the original to play it.";
+      job?.recordingState === "expired" ?
+        "This recording was removed after its retention period. The transcript and recap are still available." :
+        "Playback unavailable. Older recordings were already deleted; reupload the original to play it.";
   }
   player.load();
   $("audio-player-title").textContent = job ? `Original recording · ${job.title}` : "";
@@ -251,7 +253,7 @@ function renderJob(job) {
   $("session-content").hidden = false;
   $("session-title").textContent = job.title;
   workspace.setCurrentSession(job.title);
-  workspace.setRecordingState({ available: Boolean(job.audioRetained), demo: Boolean(job.demo) });
+  workspace.setRecordingState(job);
   $("session-meta").textContent = `${job.demo ? "FICTIONAL DEMO \u00b7 " : ""}${job.locale} \u00b7 ${job.durationMs ? time(job.durationMs) : "DURATION PENDING"}`;
   $("stage").textContent = job.stage;
   const processing = activeStatuses.has(job.status) || activeLaughterStatuses.has(job.laughter.status);
@@ -660,6 +662,38 @@ for (const [index, tab] of sessionTabs.entries()) {
   });
 }
 
+// Large recordings are sent in resumable chunks: each request stays short (proxy timeouts) and a
+// dropped connection resumes from the last byte the server confirmed instead of restarting.
+async function uploadRecording(file, fields) {
+  const json = { "Content-Type": "application/json" };
+  const started = await api("/api/uploads", {
+    method: "POST", headers: json, body: JSON.stringify({ ...fields, filename: file.name, size: file.size }),
+  });
+  let received = started.received;
+  let failures = 0;
+  while (received < file.size) {
+    const end = Math.min(received + started.chunkBytes, file.size);
+    $("upload-help").textContent = `Uploading recording: ${Math.floor(received / file.size * 100)}% of ${(file.size / 1048576).toFixed(0)} MB. Keep this page open until upload finishes.`;
+    try {
+      const result = await api(`/api/uploads/${started.id}/chunk?offset=${received}`, {
+        method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: file.slice(received, end),
+      });
+      received = result.received;
+      failures = 0;
+    } catch (error) {
+      if (error.status === 401 || error.status === 403 || error.status === 404 || ++failures > 5) {
+        if (error.status !== 404) await api(`/api/uploads/${started.id}`, { method: "DELETE" }).catch(() => {});
+        throw error;
+      }
+      $("upload-help").textContent = "Connection interrupted. Resuming the upload...";
+      await new Promise(resolve => setTimeout(resolve, 2000 * failures));
+      received = (await api(`/api/uploads/${started.id}`)).received;
+    }
+  }
+  $("upload-help").textContent = "Upload complete. Checking the recording...";
+  return api(`/api/uploads/${started.id}/complete`, { method: "POST" });
+}
+
 $("upload-form").addEventListener("submit", async event => {
   event.preventDefault();
   if (busy) return;
@@ -672,11 +706,15 @@ $("upload-form").addEventListener("submit", async event => {
     const file = $("audio").files[0];
     if (!file || !file.size || file.size > 500 * 1024 * 1024 ||
         !/\.(mp3|opus|ogg)$/i.test(file.name)) throw new Error("Choose a non-empty MP3 or Ogg Opus (.opus or .ogg) file no larger than 500 MB.");
-    const body = new FormData(event.target);
+    const fields = new FormData(event.target);
     workspace.setImportBusy(true);
-    $("upload-help").textContent = "Uploading recording. Keep this page open until upload finishes.";
-    const job = await api("/api/jobs", { method: "POST", body });
-    await selectJob(job.id);
+    const job = await uploadRecording(file, {
+      title: String(fields.get("title") || ""),
+      locale: String(fields.get("locale") || "en-US"),
+      maxSpeakers: Number(fields.get("maxSpeakers") || 8),
+      context: String(fields.get("context") || ""),
+      consent: fields.get("consent") === "true",
+    });    await selectJob(job.id);
     activateTab("transcript");
     workspace.closeImport();
     event.target.reset();
@@ -785,6 +823,12 @@ async function loadConfiguration() {
     $("upload-help").textContent = configuration.transcriptionMissing.length ?
       `Setup needed: ${configuration.transcriptionMissing.join(", ")}. The demo works without Azure.` :
       "Azure processing is billable. Multi-hour batch jobs can take minutes to hours.";
+    $("storage-note").lastChild.textContent = configuration.retentionDays ?
+      ` Original recordings are kept for ${configuration.retentionDays} days after upload for playback, waveforms and clip export, then deleted automatically. Transcripts, recaps, speaker names and saved clip ranges stay until you delete the session. Azure Speech only receives a temporary processing copy, deleted after transcription.` :
+      " Original recordings are kept until you delete the session. Azure Speech only receives a temporary processing copy, deleted after transcription.";
+    $("retention-notice").textContent = configuration.retentionDays ?
+      `The original recording is kept for ${configuration.retentionDays} days for playback, waveforms and clip export, then deleted automatically. Transcripts, recaps and saved clip ranges stay until you delete the session.` :
+      "The original recording is kept until you delete the session.";
     if (configuration.recapMissing.length && !configuration.transcriptionMissing.length) {
       $("upload-help").textContent += " Recap configuration is missing; transcripts will still be saved.";
     }
