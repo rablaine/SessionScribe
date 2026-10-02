@@ -221,3 +221,38 @@ test("operator CLI methods issue invitation/reset links and delete only session-
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a remembered device keeps signing in while strangers exhaust the account-wide failure limit", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "scribe-device-"));
+  const accounts = new Accounts({ databasePath: path.join(root, "accounts.sqlite") });
+  await accounts.bootstrapAdministrator(fixtureEmail, fixturePassword);
+  const store = new JobStore(root);
+  await store.init();
+  const saved = { ...config };
+  Object.assign(config, { publicOrigin: "", trustProxy: 0 });
+  const server = createApp(store, new JobRunner(store), accounts).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const login = (password: string, cookie = "") => fetch(`${base}/api/auth/login`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
+    body: JSON.stringify({ email: fixtureEmail, password }),
+  });
+  try {
+    const first = await login(fixturePassword);
+    const device = first.headers.getSetCookie().find(value => value.startsWith("scribe_device="))!.split(";")[0]!;
+    assert.ok(device);
+    // Simulate a distributed attacker filling the account-wide bucket (50 failures/hour).
+    const db = (accounts as unknown as { db: { prepare(sql: string): { run(...values: unknown[]): unknown } } }).db;
+    const { createHash } = await import("node:crypto");
+    db.prepare("INSERT OR REPLACE INTO rate_limits(key,count,expiresAt) VALUES (?,?,?)")
+      .run(`login-fail:${createHash("sha256").update(fixtureEmail).digest("hex")}`, 50, Date.now() + 3_600_000);
+    assert.equal((await login(fixturePassword)).status, 429);
+    assert.equal((await login(fixturePassword, device)).status, 200);
+    assert.equal((await login("wrong-password-1", "scribe_device=" + "A".repeat(43))).status, 429);
+  } finally {
+    Object.assign(config, saved);
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    accounts.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

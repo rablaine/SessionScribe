@@ -65,6 +65,12 @@ runner.canProcess = id => {
   const owner = accounts.jobOwner(id);
   return !!owner && accounts.isActiveUser(owner);
 };
+runner.chargeExtraAudio = (id, extraMs) => {
+  const owner = accounts.jobOwner(id);
+  if (!owner) throw new Error("The session owner could not be determined.");
+  accounts.consumeQuota(owner, "audio-ms", extraMs, config.quotas.audioMs,
+    "The decoded recording is longer than its file header claimed, and the extra audio exceeds your daily audio limit.");
+};
 const app = createApp(store, runner, accounts);
 const retention = new RetentionSweeper(store, {
   retentionDays: config.retentionDays,
@@ -80,7 +86,8 @@ for (const job of store.list()) {
   if (!accounts.jobOwner(job.id)) {
     console.warn(`Session ${job.id} was not resumed because its ownership record is missing.`);
   } else if (operation === "process") {
-    runner.enqueue(job.id);
+    if (job.queuedOperation === "recap") runner.enqueueRecap(job.id);
+    else runner.enqueue(job.id);
   } else {
     runner.enqueueLaughter(job.id);
   }

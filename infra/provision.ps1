@@ -132,6 +132,33 @@ AzRun containerapp env storage set --subscription $sub -g $rg -n $names.env --st
     --file-share "/$($names.storage)/$($names.share)" --access-mode ReadWrite -o none
 
 $domain = AzRun containerapp env show --subscription $sub -g $rg -n $names.env --query properties.defaultDomain -o tsv
+
+Write-Host "Monthly budget alerts (email the subscription owners; alerts only, not a hard cap)"
+function Set-Budget([string]$scope, [string]$name, [double]$amount, [object]$filter) {
+    $notifications = @{}
+    foreach ($n in @(@{ key = "actual80"; type = "Actual"; threshold = 80 }, @{ key = "actual100"; type = "Actual"; threshold = 100 },
+                     @{ key = "forecast100"; type = "Forecasted"; threshold = 100 })) {
+        $notifications[$n.key] = @{ enabled = $true; operator = "GreaterThan"; threshold = $n.threshold; thresholdType = $n.type; contactRoles = @("Owner") }
+    }
+    $properties = @{
+        category = "Cost"; amount = $amount; timeGrain = "Monthly"
+        timePeriod = @{ startDate = (Get-Date -Day 1).ToString("yyyy-MM-01T00:00:00Z") }
+        notifications = $notifications
+    }
+    if ($filter) { $properties.filter = $filter }
+    $body = Join-Path ([IO.Path]::GetTempPath()) "budget-$([guid]::NewGuid()).json"
+    try {
+        @{ properties = $properties } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $body -Encoding utf8
+        AzRun rest --method put --url "https://management.azure.com$scope/providers/Microsoft.Consumption/budgets/$($name)?api-version=2023-11-01" --body "@$body" -o none
+    } finally { Remove-Item -LiteralPath $body -ErrorAction SilentlyContinue }
+}
+$rgScope = "/subscriptions/$sub/resourceGroups/$rg"
+Set-Budget $rgScope "session-scribe-hosting" ([double]$cfg.app.budgetMonthlyUsd) $null
+if ($cfg.app.PSObject.Properties.Name -contains "aiBudgetMonthlyUsd" -and $cfg.app.aiBudgetMonthlyUsd) {
+    # Speech/OpenAI spend lands on the (possibly shared) AI account, so it gets its own resource-filtered budget.
+    $aiFilter = @{ dimensions = @{ name = "ResourceId"; operator = "In"; values = @($aiId) } }
+    Set-Budget "/subscriptions/$sub/resourceGroups/$($ai.resourceGroup)" "session-scribe-ai" ([double]$cfg.app.aiBudgetMonthlyUsd) $aiFilter
+}
 Write-Host ""
 Write-Host "Provisioning complete."
 Write-Host "Default app URL after first deploy: https://$($cfg.app.name).$domain"

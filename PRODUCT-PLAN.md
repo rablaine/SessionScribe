@@ -1,5 +1,8 @@
 # Session Scribe: application and access roadmap
 
+> **Status (October 2026):** Hosting, 30-day retention, quotas and the hardening below are implemented. See [README.md](README.md#hosting-on-azure) for the deployed design (one Azure Container Apps replica, NFS-backed `DATA_DIR`, managed identity, manual deploys) and [SECURITY-REVIEW.md](SECURITY-REVIEW.md). Sections below that describe previews, a separate worker fleet, or SMB/App Service hosting are historical planning notes.
+
+
 ## 1. Product direction
 
 Build a working application for reviewing Dungeons & Dragons recordings, not a landing page.

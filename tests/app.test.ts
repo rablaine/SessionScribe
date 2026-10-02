@@ -182,6 +182,7 @@ test("per-user daily quotas stop repeated billable recaps and laughter runs", as
   });
   const f = await createSessionFixture("dnd-quota-test-");
   f.runner.enqueue = () => {};
+  f.runner.enqueueRecap = id => { f.runner.release(id); };
   f.runner.enqueueLaughter = () => {};
   try {
     const job = await f.save({ ...createDemo(), demo: false, audioRetained: true, durationMs: 10_000 });
@@ -192,6 +193,34 @@ test("per-user daily quotas stop repeated billable recaps and laughter runs", as
     assert.match((await limited.json()).error, /Daily recap limit/);
     assert.equal((await f.request(`${f.base}/api/jobs/${job.id}/laughter`, { method: "POST" })).status, 202);
     assert.equal((await f.request(`${f.base}/api/jobs/${job.id}/laughter`, { method: "POST" })).status, 429);
+  } finally {
+    Object.assign(config, originalConfig);
+    await f.close();
+  }
+});
+test("parallel upload starts by one user admit exactly one; recap-only work never re-transcribes", async () => {
+  const originalConfig = { ...config };
+  Object.assign(config, {
+    speechEndpoint: "https://fixture.cognitiveservices.azure.com",
+    storageAccountUrl: "https://fixture.blob.core.windows.net", authMode: "azure-cli",
+    openaiEndpoint: "https://fixture.openai.azure.com", openaiDeployment: "fixture",
+  });
+  const f = await createSessionFixture("dnd-admission-test-");
+  try {
+    const starts = await Promise.all(Array.from({ length: 6 }, (_, index) => f.request(`${f.base}/api/uploads`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: `Parallel ${index}`, consent: true, filename: "p.mp3", size: 1000 }),
+    })));
+    assert.deepEqual(starts.map(response => response.status).sort(), [201, 409, 409, 409, 409, 409]);
+
+    let submitted = false;
+    const job = await f.save({ ...createDemo(), demo: false, audioRetained: true, durationMs: 10_000, segments: [] });
+    (f.runner as unknown as { speech: { submit: () => never } }).speech.submit = () => { submitted = true; throw new Error("must not run"); };
+    f.runner.enqueueRecap(job.id);
+    const deadline = Date.now() + 5000;
+    while (f.runner.busyIds.has(job.id) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(submitted, false);
+    assert.match(f.store.get(job.id)!.error ?? "", /transcript is required/i);
   } finally {
     Object.assign(config, originalConfig);
     await f.close();

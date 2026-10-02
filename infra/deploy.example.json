@@ -28,6 +28,7 @@
     "memory": "2Gi",
     "adminEmail": "",
     "publicOrigin": "",
-    "budgetMonthlyUsd": 75
+    "budgetMonthlyUsd": 75,
+    "aiBudgetMonthlyUsd": 50
   }
 }

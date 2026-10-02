@@ -1,5 +1,8 @@
 # D&D Session Scribe: delivery plan
 
+> **Status (October 2026):** Hosting, 30-day retention, quotas and the hardening below are implemented. See [README.md](README.md#hosting-on-azure) for the deployed design (one Azure Container Apps replica, NFS-backed `DATA_DIR`, managed identity, manual deploys) and [SECURITY-REVIEW.md](SECURITY-REVIEW.md). Sections below that describe previews, a separate worker fleet, or SMB/App Service hosting are historical planning notes.
+
+
 ## Recommendation
 
 Use **Azure Speech batch diarization + Azure OpenAI recap generation** for existing recordings, and capture **separate Discord-user audio streams** in Phase 2. Keep the transcript as the system of record; make recaps replaceable, evidence-grounded drafts.

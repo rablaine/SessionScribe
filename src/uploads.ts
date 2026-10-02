@@ -39,6 +39,14 @@ class UploadError extends Error {
 export class Uploads {
   readonly root: string;
   private writing = new Set<string>();
+  private admissions: Promise<unknown> = Promise.resolve();
+  // Upload admission (per-user, global, and disk checks) runs one request at a time so parallel starts
+  // cannot all observe the same free slot.
+  private admit<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.admissions.then(work);
+    this.admissions = result.catch(() => {});
+    return result;
+  }
   constructor(private store: JobStore, private runner: JobRunner, private accounts: Accounts) {
     this.root = path.join(store.root, "uploads");
   }
@@ -102,27 +110,30 @@ export class Uploads {
       const input = parsed.data;
       if (!recordingFormat(input.filename)) throw new UploadError(400, "Only MP3 and Ogg Opus (.opus or .ogg) uploads are supported.");
       const ownerId = this.accounts.userId(req);
-      await this.cleanup();
-      const active = await this.active();
-      if (active.some(upload => upload.ownerId === ownerId)) {
-        throw new UploadError(409, "Finish or cancel your current upload before starting another.");
-      }
-      if (active.length >= MAX_ACTIVE_UPLOADS || this.runner.busyIds.size >= 5) {
-        throw new UploadError(429, "The server is busy with other uploads. Try again in a few minutes.");
-      }
-      const today = this.accounts.usageSince(ownerId, "upload", Date.now() - 86_400_000);
-      if (today >= config.quotas.uploads) {
-        throw new UploadError(429, `Daily upload limit reached (${config.quotas.uploads} per 24 hours). Try again later.`);
-      }
-      await mkdir(this.root, { recursive: true });
-      const disk = await statfs(this.root);
-      if (disk.bavail * disk.bsize < input.size + config.minFreeDiskBytes) {
-        throw new UploadError(507, "The server does not have enough free storage for this recording right now.");
-      }
-      const { consent: _consent, ...fields } = input;
-      const state: UploadState = { ...fields, id: randomUUID(), ownerId, createdAt: new Date().toISOString(), touchedAt: Date.now() };
-      await mkdir(this.directory(state.id));
-      await this.write(state);
+      const state = await this.admit(async () => {
+        await this.cleanup();
+        const active = await this.active();
+        if (active.some(upload => upload.ownerId === ownerId)) {
+          throw new UploadError(409, "Finish or cancel your current upload before starting another.");
+        }
+        if (active.length >= MAX_ACTIVE_UPLOADS || this.runner.busyIds.size >= 5) {
+          throw new UploadError(429, "The server is busy with other uploads. Try again in a few minutes.");
+        }
+        const today = this.accounts.usageSince(ownerId, "upload", Date.now() - 86_400_000);
+        if (today >= config.quotas.uploads) {
+          throw new UploadError(429, `Daily upload limit reached (${config.quotas.uploads} per 24 hours). Try again later.`);
+        }
+        await mkdir(this.root, { recursive: true });
+        const disk = await statfs(this.root);
+        if (disk.bavail * disk.bsize < input.size + config.minFreeDiskBytes) {
+          throw new UploadError(507, "The server does not have enough free storage for this recording right now.");
+        }
+        const { consent: _consent, ...fields } = input;
+        const created: UploadState = { ...fields, id: randomUUID(), ownerId, createdAt: new Date().toISOString(), touchedAt: Date.now() };
+        await mkdir(this.directory(created.id));
+        await this.write(created);
+        return created;
+      });
       res.status(201).json({ id: state.id, chunkBytes: CHUNK_BYTES, received: 0, size: state.size });
     });
 
@@ -148,6 +159,10 @@ export class Uploads {
           return;
         }
         if (received + declared > state.size) throw new UploadError(400, "Chunk exceeds the declared file size.");
+        const disk = await statfs(this.root);
+        if (disk.bavail * disk.bsize < declared + config.minFreeDiskBytes) {
+          throw new UploadError(507, "The server is out of free storage. Try again later.");
+        }
         let count = 0;
         const limiter = new Transform({
           transform(chunk: Buffer, _encoding, callback) {

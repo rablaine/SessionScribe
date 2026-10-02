@@ -229,59 +229,70 @@ Playback uses your browser's native audio codecs. MP3 playback and timestamp nav
 
 ## Hosting on Azure
 
-The hosted shape mirrors a small "one container + SQLite on a file share" app, with the extra
-protections this workload needs:
+The hosted shape is the same idea as a small "one container + SQLite on a file share" app, with the
+extra protections this workload needs:
 
 ```text
-Browser ──HTTPS──> Container Apps ingress (TLS, 1 trusted proxy hop)
+Browser ──HTTPS──> Container Apps ingress (TLS; appends client IP to X-Forwarded-For)
                      └─ one replica (1 vCPU / 2 GiB): Node app + FFmpeg + YAMNet
-                          ├─ /data  Azure Files share (SMB, private endpoint only)
+                          ├─ /data  NFS 4.1 Azure Files share (private endpoint only, no keys)
                           │         accounts.sqlite (rollback journal), job JSON, originals, backups/
-                          ├─ Blob (private endpoint) temporary mono audio for Speech
+                          ├─ Blob (private endpoint): temporary mono audio for Speech
                           └─ Azure AI Speech + Azure OpenAI via user-assigned managed identity
 ```
 
 - **Exactly one replica** (`minReplicas = maxReplicas = 1`). SQLite and the in-process job queue assume
-  one writer; `.instance.lock` in `DATA_DIR` enforces it during deploys and restarts.
-- **No public storage.** The file share and the Speech-input Blob account are reachable only through
-  private endpoints in the app's dedicated VNet. The file share is mounted with its account key
-  (a Container Apps secret); the account itself has public network access disabled.
+  one writer; `.instance.lock` in `DATA_DIR` enforces it. During a rollout the new replica answers
+  "starting" for a few seconds until the old one releases the lock, then resumes any in-flight jobs.
+- **No storage keys or public storage.** The NFS share's account has public network access and
+  shared-key auth disabled; only the private endpoint in the app's VNet reaches it. The Speech-input
+  Blob account is reached through its own private endpoint.
 - **No stored cloud credentials in the app.** Speech, OpenAI, Blob and image pulls use a user-assigned
   managed identity with only AcrPull, Speech User, OpenAI User and container-scoped Blob Data Contributor.
+- **Least privilege in the container.** The entrypoint fixes `/data` ownership as root, then drops to
+  the `node` user with no capabilities.
 - **Backups.** Every day the app writes a consistent copy of `accounts.sqlite` (users, ownership,
-  clip ranges) to `/data/backups/`, keeping 14 days. File-share soft delete keeps a deleted share for
-  14 days. Recordings and transcripts are deliberately not copied into backups, so deleting a session
-  or expiring a recording is not undone by a hidden copy.
+  clip ranges) to `/data/backups/`, keeping 14. Recordings and transcripts are deliberately not
+  copied, so deleting a session or expiring a recording is not undone by a hidden copy.
+- **Cost guardrails.** Per-user daily quotas in the app, plus two Azure budget alerts (the app's resource group and the AI account) created by `provision.ps1`. Budgets alert; they do not cap.
 
-### Provision (once)
+Approximate monthly cost: Container Apps ≈ $22 (idle-rate single replica), premium NFS share (100 GiB) ≈ $16,
+two private endpoints ≈ $15, container registry ≈ $5, logs ≈ $1, plus Speech/OpenAI usage.
+
+### Provision (once, re-runnable)
 
 ```powershell
 Copy-Item infra\deploy.example.json infra\deploy.local.json   # gitignored; fill in real names
 .\infra\provision.ps1
 ```
 
-`provision.ps1` is re-runnable. It creates only app-specific resources in its own resource group
-(VNet, private endpoints, file storage, registry, Log Analytics, identity, Container Apps environment)
-plus the identity's role assignments. It does not change unrelated apps, plans or model deployments.
+`provision.ps1` creates only app-specific resources in its own resource group: VNet, private
+endpoints, NFS storage, registry, Log Analytics, identity and Container Apps environment. It also
+creates the identity's role assignments and the budget alerts. It does not change unrelated apps,
+plans or model deployments.
 
 ### Deploy (manual, whenever you choose)
 
 ```powershell
-.\infra\deploy.ps1                          # build image in ACR from the working tree, then roll out
-.\infra\deploy.ps1 -SkipBuild -Tag <tag>    # roll back/forward to an existing image tag
+.\infra\deploy.ps1                          # build the image in ACR from the working tree, then roll out
+.\infra\deploy.ps1 -SkipBuild -Tag <tag>    # roll back or forward to an existing image tag
 ```
 
 There is no CI/CD and nothing deploys on push. The build context is filtered by `.dockerignore`
 (an allowlist), so `.env`, `.secrets/`, `data/` and `.private/` never leave your machine.
-A rollout causes a few seconds of "starting" responses while the new replica takes the data lock.
 
-### First administrator in the cloud
+### Account administration in the cloud
+
+Every command runs inside the container as the app user and prints a one-use link. No password is typed into a remote shell.
 
 ```powershell
-az containerapp exec -g <resource-group> -n session-scribe --command "node dist/account-cli.js --email you@example.com"
+az containerapp exec -g <rg> -n session-scribe --command "scribe-admin bootstrap-link --email you@example.com"  # first admin (link valid 24 h)
+az containerapp exec -g <rg> -n session-scribe --command "scribe-admin reset-link --email you@example.com"      # lost password (1 h)
+az containerapp exec -g <rg> -n session-scribe --command "scribe-admin invite --email friend@example.com"       # invitation (72 h)
+az containerapp exec -g <rg> -n session-scribe --command "scribe-admin delete-user --email someone@example.com" # session-free non-admin
 ```
 
-The CLI prompts for the password inside the container; it is never passed as an argument.
+Normal invitations, approvals and resets are also available in the app's **Access management** page.
 
 ### Restore the accounts database
 
@@ -316,7 +327,7 @@ npm run build
 
 Tests exercise normalization, exact timestamps/exports, diarization request shape, legacy recap references, citation-free narrative persistence, application-owned scene ranges, long-transcript processing, local persistence, API actions, origin/host restrictions, audio tooling, and the gateway's injected token/storage contract (auth/caller/audience, path validation, streamed limits, concurrency, cleanup, upload/delete, exact URL checks). A real RS256/JWKS cryptographic test also checks valid signatures and rejects invalid signatures, expired tokens, and wrong audience/issuer; only its JWKS transport is injected. Live Azure gateway networking, JWT issuance, transcription/recap accuracy, and real billing require configured resources and a consented recording; fixtures and the fictional demo are not proof of those integrations.
 
-Latest validation: **79 tests pass**, TypeScript check and build pass. Account tests cover cookies/CSRF, bounded password hashing, generic failures and durable throttling, pending gates, one-use/expired/bound invitations and resets, password replacement/revocation, suspension, restart durability, and ownership on every session surface including ranged GET/HEAD audio. The earlier live synthetic Azure pipeline also completed successfully; its test session was subsequently removed at the owner's request. Opus coverage includes real stereo Ogg Opus decoding into 16 kHz mono MP3, codec/container validation, rejection before cloud upload of an MP3 renamed to `.opus`, and cleanup. Playback/review coverage includes session/entry deletion, legacy retention migration, validated edits, retained stale recaps, failed/successful regeneration, and corrected/empty exports. Two roughly two-hour reference sessions also completed the scene-extraction and narrative-writing pipeline on GPT-5.4, with no model-generated paragraph references. Manual comparison found substantially better concrete story coverage, including the endings; the prose remains more detailed than the human examples and still requires review for transcription ambiguities and attribution. Broad recognition accuracy, overlapping-speech accuracy, and sustained shared-plan load remain unverified.
+Latest validation: **90 tests pass**, TypeScript check and build pass. Hosting tests cover exact host/origin, HSTS, `__Host-` cookies, trusted-proxy client resolution and spoofing, email+client lockout, invite-only signup, the pending-queue cap, retention expiry/purge, the instance lock, backups, operator links, chunked/resumable uploads and per-user quotas. The hosted deployment passed a real end-to-end run with its managed identity: invitation sign-up, chunked Opus upload, Speech diarization over the private Blob endpoint, YAMNet in the container, a GPT-5.4 recap, waveform, clip export, ranged playback, and session deletion with cloud cleanup. In-flight processing survived three rolling deploys. Account tests cover cookies/CSRF, bounded password hashing, generic failures and durable throttling, pending gates, one-use/expired/bound invitations and resets, password replacement/revocation, suspension, restart durability, and ownership on every session surface including ranged GET/HEAD audio. The earlier live synthetic Azure pipeline also completed successfully; its test session was subsequently removed at the owner's request. Opus coverage includes real stereo Ogg Opus decoding into 16 kHz mono MP3, codec/container validation, rejection before cloud upload of an MP3 renamed to `.opus`, and cleanup. Playback/review coverage includes session/entry deletion, legacy retention migration, validated edits, retained stale recaps, failed/successful regeneration, and corrected/empty exports. Two roughly two-hour reference sessions also completed the scene-extraction and narrative-writing pipeline on GPT-5.4, with no model-generated paragraph references. Manual comparison found substantially better concrete story coverage, including the endings; the prose remains more detailed than the human examples and still requires review for transcription ambiguities and attribution. Broad recognition accuracy, overlapping-speech accuracy, and sustained shared-plan load remain unverified.
 
 Recap browser checks used an isolated fictional fixture, not real account data: citation-free prose rendering, collapsed recording navigation, paused seeking to the expected timestamp without leaving the recap, clip-editor opening with bounded defaults, and a 390-pixel layout without horizontal overflow.
 

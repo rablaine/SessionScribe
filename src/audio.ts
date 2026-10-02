@@ -81,11 +81,18 @@ export function validateRecordingMetadata(metadata: {
   return durationMs;
 }
 
-export async function normalizeAudio(executable: string, input: string, output: string) {
+export async function normalizeAudio(executable: string, input: string, output: string, maxDurationMs?: number) {
   await runTool(executable, [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", input,
+    ...(maxDurationMs ? ["-t", String(maxDurationMs / 1000)] : []),
     "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-codec:a", "libmp3lame", "-b:a", "64k", output,
   ], 30 * 60 * 1000);
+}
+
+// Duration of audio this app encoded itself (fully decoded CBR output), unlike uploader-controlled headers.
+export async function inspectDecodedDuration(executable: string, file: string): Promise<number> {
+  const output = await runTool(executable, ["-v", "error", "-show_entries", "format=duration", "-of", "json", file], 60_000);
+  return z.object({ format: z.object({ duration: z.coerce.number().nonnegative() }) }).parse(JSON.parse(output)).format.duration * 1000;
 }
 
 export async function extractAudioClip(executable: string, input: string, output: string, startMs: number, endMs: number) {

@@ -42,6 +42,7 @@ const LEGACY_COOKIE = "scribe_session";
 // The __Host- prefix forbids Domain/insecure cookies, so a sibling subdomain cannot plant a session.
 const SECURE_COOKIE = "__Host-scribe_session";
 const SESSION_MS = 12 * 60 * 60 * 1000;
+const DEVICE_MS = 180 * 24 * 60 * 60 * 1000;
 const INVITE_MS = 72 * 60 * 60 * 1000;
 const RESET_MS = 60 * 60 * 1000;
 const GENERIC_SIGNUP = "If registration is available for this address, your request will be processed.";
@@ -134,6 +135,7 @@ export class Accounts {
   private readonly origin?: string;
   private readonly secure: boolean;
   private readonly cookie: string;
+  private readonly deviceCookie: string;
   private readonly reservedEmail?: string;
   private readonly openSignup: boolean;
   private readonly maxPending: number;
@@ -149,6 +151,7 @@ export class Accounts {
     }
     this.secure = this.origin?.startsWith("https:") ?? false;
     this.cookie = this.secure ? SECURE_COOKIE : LEGACY_COOKIE;
+    this.deviceCookie = this.secure ? "__Host-scribe_device" : "scribe_device";
     this.openSignup = options.openSignup ?? true;
     this.maxPending = options.maxPendingAccounts ?? 25;
     this.reservedEmail = options.adminEmail ? emailSchema.parse(options.adminEmail) : undefined;
@@ -156,7 +159,7 @@ export class Accounts {
     this.db = new DatabaseSync(options.databasePath);
     this.db.exec(`PRAGMA journal_mode=${options.journalMode ?? "WAL"}; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;`);
     const version = (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    if (version > 4) { this.db.close(); throw new Error("Unsupported accounts database version."); }
+    if (version > 5) { this.db.close(); throw new Error("Unsupported accounts database version."); }
     if (version === 0) this.db.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE users (
@@ -218,6 +221,15 @@ export class Accounts {
       PRAGMA user_version=4;
       COMMIT;
     `);
+    if (version < 5) this.db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE IF NOT EXISTS devices (
+        hash TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expiresAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS devices_user ON devices(userId,expiresAt);
+      PRAGMA user_version=5;
+      COMMIT;
+    `);
     this.routes();
   }
 
@@ -269,8 +281,27 @@ export class Accounts {
       [`login-fail:${hash(email)}`, 50, 60 * 60 * 1000],
     ] as const;
   }
-  private checkLoginFailures(req: Request, email: string) {
-    for (const [key, limit] of this.loginFailureKeys(req, email)) {
+  // A browser that previously signed in to this account carries a device token. It is exempt from the
+  // account-wide failure ceiling, so strangers hammering an email address cannot lock its owner out.
+  private knownDevice(req: Request, userId: string | undefined): boolean {
+    if (!userId) return false;
+    const raw = (req.get("cookie") ?? "").split(";").map(value => value.trim())
+      .find(value => value.startsWith(`${this.deviceCookie}=`))?.slice(this.deviceCookie.length + 1);
+    if (!raw || !tokenSchema.safeParse(raw).success) return false;
+    return !!this.get("SELECT hash FROM devices WHERE hash=? AND userId=? AND expiresAt>?", hash(raw), userId, Date.now());
+  }
+  private rememberDevice(res: Response, userId: string) {
+    const raw = token();
+    this.transaction(() => {
+      this.run("DELETE FROM devices WHERE expiresAt<=?", Date.now());
+      this.run("INSERT INTO devices(hash,userId,expiresAt) VALUES (?,?,?)", hash(raw), userId, Date.now() + DEVICE_MS);
+      this.run(`DELETE FROM devices WHERE userId=? AND hash NOT IN
+        (SELECT hash FROM devices WHERE userId=? ORDER BY expiresAt DESC LIMIT 20)`, userId, userId);
+    });
+    res.cookie(this.deviceCookie, raw, { httpOnly: true, sameSite: "strict", secure: this.secure, path: "/", maxAge: DEVICE_MS });
+  }
+  private checkLoginFailures(req: Request, email: string, knownDevice = false) {
+    for (const [key, limit] of this.loginFailureKeys(req, email).slice(0, knownDevice ? 1 : 2)) {
       const row = this.get<{ count: number }>("SELECT count FROM rate_limits WHERE key=? AND expiresAt>?", key, Date.now());
       if (row && row.count >= limit) throw new PublicError(429, "Too many requests. Try again later.");
     }
@@ -533,8 +564,8 @@ export class Accounts {
       this.rate(req, "login");
       if (!parsed.success) throw new PublicError(401, GENERIC_LOGIN);
       const { email, password } = parsed.data;
-      this.checkLoginFailures(req, email);
       const user = this.emailUser(email);
+      this.checkLoginFailures(req, email, this.knownDevice(req, user?.id));
       const matches = await passwordMatches(password, user?.password);
       // Re-read after the asynchronous KDF: reset/suspension may have happened in flight.
       const current = user ? this.user(user.id) : undefined;
@@ -543,7 +574,9 @@ export class Accounts {
         this.recordLoginFailure(req, email);
         throw new PublicError(401, GENERIC_LOGIN);
       }
-      res.json(this.issueSession(req, res, current));
+      const session = this.issueSession(req, res, current);
+      if (!this.knownDevice(req, current.id)) this.rememberDevice(res, current.id);
+      res.json(session);
     });
     this.router.post("/auth/register", async (req, res) => {
       const parsed = signupSchema.safeParse(req.body);

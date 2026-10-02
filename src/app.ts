@@ -293,10 +293,17 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     if (transcriptCharacters(job) > config.recapMaxTranscriptChars) {
       res.status(413).json({ error: `This transcript is too long for a recap (limit ${config.recapMaxTranscriptChars.toLocaleString("en-US")} characters).` }); return;
     }
-    accounts.consumeQuota(accounts.userId(req), "recap", 1, config.quotas.recaps,
-      `Daily recap limit reached (${config.quotas.recaps} per 24 hours). Try again later.`);
-    await store.save({ ...job, status: "queued", stage: "Recap queued", error: undefined });
-    runner.enqueue(job.id);
+    // Reserve synchronously so a transcript edit cannot slip in between the checks and the queued save.
+    if (!runner.reserve(job.id)) { res.status(409).json({ error: "Session is already processing." }); return; }
+    try {
+      accounts.consumeQuota(accounts.userId(req), "recap", 1, config.quotas.recaps,
+        `Daily recap limit reached (${config.quotas.recaps} per 24 hours). Try again later.`);
+      await store.save({ ...job, status: "queued", stage: "Recap queued", error: undefined, queuedOperation: "recap" });
+    } catch (error) {
+      runner.release(job.id);
+      throw error;
+    }
+    runner.enqueueRecap(job.id);
     res.status(202).json({ id: job.id });
   });
   app.get("/api/jobs/:id/export/:format", (req, res) => {

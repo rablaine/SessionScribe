@@ -1,15 +1,18 @@
 import { rm } from "node:fs/promises";
 import { config, readiness } from "./config.js";
-import { inspectRecording, normalizeAudio } from "./audio.js";
+import { inspectDecodedDuration, inspectRecording, normalizeAudio } from "./audio.js";
 import { AzureSpeech } from "./azure.js";
-import { recordingAvailable, type Job } from "./domain.js";
+import { recordingAvailable, recordingState, type Job } from "./domain.js";
 import { generateRecap } from "./recap.js";
 import { JobStore } from "./store.js";
 import { LaughterDetector, type LaughterDetection } from "./laughter.js";
 
 export const activeStatuses = new Set(["queued", "normalizing", "uploading", "transcribing", "summarizing"]);
 export const activeLaughterStatuses = new Set(["queued", "running"]);
-type QueueItem = { id: string; operation: "process" | "laughter" };
+type QueueItem = { id: string; operation: "process" | "recap" | "laughter" };
+// Speech output can be slightly longer than container metadata; differences beyond this are charged.
+const DURATION_TOLERANCE_MS = 10_000;
+const MAX_TRANSCRIPTION_MS = 4 * 60 * 60 * 1000;
 
 export class JobRunner {
   private queue: QueueItem[] = [];
@@ -19,6 +22,9 @@ export class JobRunner {
   readonly busyIds = new Set<string>();
   // Set by the server: queued work for suspended/removed owners must not keep spending Azure money.
   canProcess: (id: string) => boolean = () => true;
+  // Set by the server: charges decoded audio beyond the declared duration to the owner's quota (throws when over).
+  chargeExtraAudio: (id: string, extraMs: number) => void = () => {};
+  private reserved = new Set<string>();
   constructor(
     private store: JobStore,
     private speech = new AzureSpeech(),
@@ -30,12 +36,29 @@ export class JobRunner {
     this.enqueueOperation(id, "process");
   }
 
+  // Recap-only work never (re)transcribes, even if the transcript was emptied after queuing.
+  enqueueRecap(id: string) {
+    this.enqueueOperation(id, "recap");
+  }
+
+  // Marks a job busy synchronously so concurrent edits are refused before the caller's async work.
+  reserve(id: string): boolean {
+    if (this.busyIds.has(id)) return false;
+    this.busyIds.add(id);
+    this.reserved.add(id);
+    return true;
+  }
+  release(id: string) {
+    if (this.reserved.delete(id)) this.busyIds.delete(id);
+  }
+
   enqueueLaughter(id: string) {
     this.enqueueOperation(id, "laughter");
   }
 
   private enqueueOperation(id: string, operation: QueueItem["operation"]) {
-    if (this.busyIds.has(id)) throw new Error("Job is already processing.");
+    if (this.reserved.has(id)) this.reserved.delete(id);
+    else if (this.busyIds.has(id)) throw new Error("Job is already processing.");
     this.busyIds.add(id);
     this.queue.push({ id, operation });
     void this.drain().catch(error => {
@@ -62,7 +85,7 @@ export class JobRunner {
         const { id, operation } = this.queue.shift()!;
         try {
           if (operation === "laughter") await this.processLaughter(id);
-          else await this.process(id);
+          else await this.process(id, operation === "recap");
         } finally {
           this.busyIds.delete(id);
         }
@@ -116,17 +139,28 @@ export class JobRunner {
     await this.detectLaughter(job, false);
   }
 
-  private async process(id: string) {
+  private async process(id: string, recapOnly = false) {
     let job = this.store.get(id)!;
     try {
       if (!this.canProcess(id)) throw new Error("The session owner's account is no longer active, so processing stopped.");
+      if (recapOnly && !job.segments.length) throw new Error("A transcript is required before generating a recap.");
+      if (!job.segments.length && !job.speechJobUrl && recordingState(job) === "expired") {
+        throw new Error("The original recording is no longer available for transcription.");
+      }
       if (!job.segments.length) {
         if (readiness().transcriptionMissing.length) throw new Error("Azure Speech/Storage configuration is incomplete.");
         if (!job.speechJobUrl) {
           job = await this.update(id, { status: "normalizing", stage: "Checking recording and mixing to mono for diarization", error: undefined });
           const durationMs = await inspectRecording(config.ffprobe, this.store.audioPath(id), job.originalName);
           job = await this.update(id, { durationMs, audioRetained: true });
-          await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id));
+          await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id), MAX_TRANSCRIPTION_MS + 60_000);
+          // Container metadata can understate length; bill and bound the audio Speech will actually receive.
+          const decodedMs = await inspectDecodedDuration(config.ffprobe, this.store.monoPath(id));
+          if (decodedMs > MAX_TRANSCRIPTION_MS + 30_000) {
+            throw new Error("This recording exceeds Azure batch diarization's 4-hour limit. Split it manually; speaker labels will not carry across files.");
+          }
+          if (decodedMs > durationMs + DURATION_TOLERANCE_MS) this.chargeExtraAudio(id, decodedMs - durationMs);
+          job = await this.update(id, { durationMs: Math.max(durationMs, decodedMs) });
           job = await this.update(id, { status: "uploading", stage: "Uploading to private Azure Blob Storage", blobName: `${id}/mono.mp3` });
           const audioUrl = await this.speech.upload(this.store.monoPath(id), job.blobName!);
           // Shutdown waits for this window so a submitted (billable) Speech job is never forgotten and resubmitted.
@@ -148,14 +182,14 @@ export class JobRunner {
       if (readiness().recapMissing.length) throw new Error("Transcript is ready. Configure Azure OpenAI to generate its recap.");
       job = await this.update(id, { status: "summarizing", stage: "Preparing evidence-grounded recap", error: undefined });
       const recap = await this.recap(job, async stage => { await this.update(id, { stage }); });
-      job = await this.update(id, { recap, recapStale: false, status: "completed", stage: "Transcript and recap ready" });
+      job = await this.update(id, { recap, recapStale: false, status: "completed", stage: "Transcript and recap ready", queuedOperation: undefined });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unexpected processing failure.";
       console.error(`Job ${id} failed: ${message}`);
       job = await this.update(id, {
         status: this.store.get(id)!.segments.length ? "transcript_ready" : "failed",
         stage: this.store.get(id)!.segments.length ? "Transcript saved; recap requires attention" : "Processing failed",
-        error: message,
+        error: message, queuedOperation: undefined,
       });
     } finally {
       const warnings = await this.speech.cleanup(job);

@@ -105,6 +105,8 @@ export const jobSchema = z.object({
   recordingUploadedAt: z.string().optional(),
   recordingExpiresAt: z.string().optional(),
   recordingPurgedAt: z.string().optional(),
+  // Persisted so a restart resumes a queued recap as recap-only work, never as a fresh transcription.
+  queuedOperation: z.enum(["process", "recap"]).optional(),
 });
 export type Job = z.infer<typeof jobSchema>;
 

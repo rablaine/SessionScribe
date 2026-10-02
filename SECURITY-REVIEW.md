@@ -26,6 +26,10 @@ This file deliberately contains no real resource names, IDs, hostnames or email 
 | 9 | Info | Localhost-only protections needed production equivalents | **Fixed.** See §2 |
 | 10 | Info | Suspended users' queued jobs kept running | **Fixed.** The runner checks that the owner is still active before billable processing |
 | 11 | Info | The global JSON parser ran before the accounts router's tighter 16 KB limit | **Fixed.** The accounts router now parses first |
+| 12 | 🟡 MEDIUM | *(found in final review)* A forged duration header (MP3 Xing/Info or Ogg granule) could understate length, getting past the audio-hours quota and the 4-hour cap | **Fixed.** Normalization is capped at 4 h. The length of the audio actually sent to Speech is measured from the app's own encoded output, and any excess over the header is charged to the user's quota (or the job fails) |
+| 13 | 🟡 MEDIUM | *(final review)* Parallel `POST /api/uploads` requests could all pass the per-user, global and free-disk checks, allowing a disk fill | **Fixed.** Upload admission is serialized, and free space is re-checked on every chunk |
+| 14 | 🟡 MEDIUM | *(final review)* A recap request racing a transcript wipe could trigger an unmetered re-transcription | **Fixed.** The job is reserved synchronously before any await. Recap-only work (persisted as `queuedOperation`) never transcribes, and expired recordings are never transcribed |
+| 15 | ⚪ LOW | *(final review)* Strangers could fill the email-wide failure bucket and lock a known user out for an hour | **Fixed.** A browser that has signed in before carries a 180-day HttpOnly device token that exempts it from the account-wide bucket (the OWASP device-cookie pattern) |
 
 No critical or high findings were raised in either review. `npm audit --omit=dev` reports 0 vulnerabilities.
 
@@ -63,10 +67,10 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
 
   There are no keys, connection strings or certificates in the app or the image.
 - **Storage.**
-  - The persistent file share's storage account has **public network access disabled** and is reachable only through a private endpoint in the app's VNet.
-  - Its account key is held as a Container Apps environment secret, which SMB mounts require.
+  - The persistent volume is an **NFS 4.1** Azure Files share on a premium account with public network access disabled and shared-key auth disabled. There is no account key anywhere; only the private endpoint in the app's VNet can reach it.
+  - NFS requires the account's "secure transfer" flag off, so traffic is unencrypted, but it never leaves the private network.
   - The Speech-input Blob account keeps its existing perimeter, firewall, and disabled anonymous and shared-key access. The app reaches it through its own private endpoint.
-- **Images.** Built in ACR from an allowlisted `.dockerignore`, so `.env`, `.secrets/`, `data/` and `.private/` are never uploaded. The container runs as a non-root user (`node`).
+- **Process privileges.** The container starts as root only long enough to make `/data` writable by `node`. It then drops to `node` via `setpriv` with no capabilities and `no_new_privs`. Account administration (`scribe-admin`) also runs as `node`.- **Images.** Built in ACR from an allowlisted `.dockerignore`, so `.env`, `.secrets/`, `data/` and `.private/` are never uploaded. The container runs as a non-root user (`node`).
 - **Deploys.** Manual only (`infra/deploy.ps1`). There is no CI/CD, no stored GitHub secrets, and nothing deploys on push.
 - **Backups.** Only the accounts database, kept for 14 days. Recordings and transcripts are not copied, so deletion and expiry are real.
 
@@ -75,9 +79,9 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
 | Risk | Recommendation |
 |------|----------------|
 | A friend's account is phished, or they reuse a password | Quotas cap the damage. Suspend the account from Access management, which revokes its sessions immediately. |
-| Key-based access on the shared AI account | If nothing else needs keys, set `disableLocalAuth=true` on the Speech/OpenAI account. The app uses only Entra ID. *Not changed automatically, because other apps may share that account.* |
-| No hard spending cap in Azure | Budgets only alert. Keep the quotas. Set a subscription or resource-group budget with email alerts, and keep the OpenAI deployment's tokens-per-minute (TPM) capacity modest. |
-| SQLite on an SMB share | Safe only with one writer: rollback-journal mode, `nobrl`, and the instance lock. Never raise `maxReplicas` above 1. |
+| Key-based access on the shared AI account | Verified: the AI account already has `disableLocalAuth=true`, so only Entra ID tokens work. Keep it that way. |
+| No hard spending cap in Azure | Budgets only alert. `provision.ps1` creates two: one for the app's resource group and one filtered to the AI account. Both email subscription Owners at 80% and 100% of actual spend and at 100% of forecast. The per-user quotas are the real limiter. Keep the OpenAI deployment's tokens-per-minute (TPM) capacity modest. |
+| SQLite on a network share (NFS 4.1) | Safe only with one writer: rollback-journal mode, NFS byte-range locks, and the instance lock. Never raise `maxReplicas` above 1. |
 | Opus playback depends on the browser | Some embedded browsers lack Opus decoding. MP3 always works. |
 | The default `*.azurecontainerapps.io` hostname | Fine to use. A custom domain gets a free managed certificate; update `APP_PUBLIC_ORIGIN` when you switch. |
 
@@ -88,5 +92,5 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
 - [x] Secret scan (`detect-secrets`) over tracked files finds only test fixtures and the model checksum.
 - [x] Clean history authored with a GitHub no-reply address.
 - [ ] On GitHub: turn on secret scanning, push protection and Dependabot alerts.
-- [ ] In Azure: a budget alert on the app's resource group and on the AI account.
-- [ ] Optional: `disableLocalAuth=true` on the AI account (see §5).
+- [x] In Azure: budget alerts on the app's resource group and on the AI account.
+- [x] `disableLocalAuth=true` on the AI account (verified).
