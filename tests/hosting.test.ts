@@ -199,3 +199,22 @@ test("daily backups copy only the accounts database and keep fourteen days", asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("operator CLI methods issue invitation/reset links and delete only session-free non-admin accounts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "scribe-operator-"));
+  const accounts = new Accounts({ databasePath: path.join(root, "accounts.sqlite"), publicOrigin: "https://scribe.example.test" });
+  try {
+    await accounts.bootstrapAdministrator(fixtureEmail, fixturePassword);
+    const invite = accounts.operatorInvite(" Friend@Example.test ");
+    assert.match(invite.url, /^https:\/\/scribe\.example\.test\/#invite=[A-Za-z0-9_-]{43}&email=friend%40example\.test$/);
+    assert.match(accounts.operatorResetLink(fixtureEmail).url, /^https:\/\/scribe\.example\.test\/#reset=[A-Za-z0-9_-]{43}$/);
+    assert.throws(() => accounts.operatorResetLink("nobody@example.test"), /No active or pending/);
+    assert.throws(() => accounts.operatorInvite(fixtureEmail), /not available/);
+    assert.throws(() => accounts.operatorDeleteUser(fixtureEmail), /Administrator/);
+    const local = new Accounts({ databasePath: path.join(root, "other.sqlite") });
+    try { assert.throws(() => local.operatorInvite("x@example.test"), /APP_PUBLIC_ORIGIN/); } finally { local.close(); }
+  } finally {
+    accounts.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -391,6 +391,54 @@ export class Accounts {
     this.db.prepare("VACUUM INTO ?").run(file);
   }
 
+  // Operator commands (run inside the server environment via the account CLI, never over HTTP).
+  private operatorOrigin(): string {
+    if (!this.origin) throw new Error("Set APP_PUBLIC_ORIGIN so the link points at the right host.");
+    return this.origin;
+  }
+  operatorInvite(rawEmail: string): { url: string; expiresAt: string } {
+    const email = emailSchema.parse(rawEmail);
+    const origin = this.operatorOrigin(), raw = token(), expiresAt = Date.now() + INVITE_MS;
+    this.transaction(() => {
+      const user = this.emailUser(email);
+      if (email === this.reservedEmail || (user && (user.role === "admin" || user.status !== "pending"))) {
+        throw new Error("Invitation is not available for this address (it is reserved or already active).");
+      }
+      this.run("INSERT OR IGNORE INTO whitelist(email,createdAt) VALUES (?,?)", email, new Date().toISOString());
+      this.run("UPDATE links SET usedAt=? WHERE kind='invitation' AND email=? AND usedAt IS NULL", Date.now(), email);
+      this.run("INSERT INTO links(hash,kind,email,expiresAt) VALUES (?,'invitation',?,?)", hash(raw), email, expiresAt);
+      this.audit("invitation.issued-by-operator", null, user?.id ?? null);
+    });
+    return { url: `${origin}/#invite=${raw}&email=${encodeURIComponent(email)}`, expiresAt: new Date(expiresAt).toISOString() };
+  }
+  operatorResetLink(rawEmail: string): { url: string; expiresAt: string } {
+    const email = emailSchema.parse(rawEmail);
+    const origin = this.operatorOrigin(), raw = token(), expiresAt = Date.now() + RESET_MS;
+    this.transaction(() => {
+      const user = this.emailUser(email);
+      if (!user || !["active", "pending"].includes(user.status)) throw new Error("No active or pending account uses this email.");
+      this.run("UPDATE links SET usedAt=? WHERE kind='reset' AND userId=? AND usedAt IS NULL", Date.now(), user.id);
+      this.run("INSERT INTO links(hash,kind,email,userId,expiresAt) VALUES (?,'reset',?,?,?)", hash(raw), user.email, user.id, expiresAt);
+      this.audit("reset.issued-by-operator", null, user.id);
+    });
+    return { url: `${origin}/#reset=${raw}`, expiresAt: new Date(expiresAt).toISOString() };
+  }
+  operatorDeleteUser(rawEmail: string): void {
+    const email = emailSchema.parse(rawEmail);
+    this.transaction(() => {
+      const user = this.emailUser(email);
+      if (!user) throw new Error("No account uses this email.");
+      if (user.role === "admin") throw new Error("Administrator accounts cannot be deleted with this command.");
+      if (this.get("SELECT jobId FROM job_owners WHERE userId=? LIMIT 1", user.id)) {
+        throw new Error("This account still owns sessions. Delete them in the app first.");
+      }
+      this.run("DELETE FROM users WHERE id=?", user.id);
+      this.run("DELETE FROM whitelist WHERE email=?", email);
+      this.run("DELETE FROM links WHERE email=?", email);
+      this.audit("user.deleted-by-operator", null, user.id);
+    });
+  }
+
   usageSince(userId: string, kind: UsageKind, sinceMs: number): number {
     return Number(this.get<{ total: number | null }>(
       "SELECT SUM(amount) AS total FROM usage WHERE userId=? AND kind=? AND createdAt>?", userId, kind, sinceMs)?.total ?? 0);

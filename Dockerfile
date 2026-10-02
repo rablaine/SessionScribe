@@ -27,7 +27,8 @@ COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY public ./public
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh && chmod 0755 /usr/local/bin/docker-entrypoint.sh && mkdir -p /data && chown node:node /data
+COPY scribe-admin /usr/local/bin/scribe-admin
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/bin/scribe-admin && chmod 0755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/scribe-admin && mkdir -p /data && chown node:node /data
 # Starts as root only to fix ownership of the mounted volume, then drops to the unprivileged node user.
 ENV HOME=/home/node \
     HOST=0.0.0.0 \
