@@ -171,7 +171,6 @@
     $("signup-hint").textContent = open ?
       "Anyone may request an account. Ordinary signups stay pending until the administrator personally confirms identity and approves access. A valid invitation activates only its bound, whitelisted email." :
       "Accounts are by invitation only. Open the one-use invitation link the administrator shared with you, or enter your email and paste its token below.";
-    $("signup-invitation").required = !open;
   }
 
   function applySession(data, error = "") {

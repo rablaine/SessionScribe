@@ -21,7 +21,15 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
   const app = express();
   app.disable("x-powered-by");
   // Behind exactly N trusted proxies req.ip is the client address they observed; spoofed entries further left are ignored.
-  if (config.trustProxyHops) app.set("trust proxy", config.trustProxyHops);
+  if (config.trustProxy) app.set("trust proxy", config.trustProxy);
+  if (config.logForwarding) {
+    app.use("/api/auth/login", (req, _res, next) => {
+      const chain = (req.get("x-forwarded-for") ?? "").split(",").map(value => value.trim()).filter(Boolean);
+      const kind = (ip: string) => /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd]|fe80)/i.test(ip) ? "private" : "public";
+      console.log(`Forwarding diagnostics: socket=${kind(req.socket.remoteAddress ?? "")} chain=[${chain.map(kind).join(", ")}] resolved=${kind(req.ip ?? "")}`);
+      next();
+    });
+  }
   const publicUrl = config.publicOrigin ? new URL(config.publicOrigin) : undefined;
   app.use((req, res, next) => {
     const host = req.get("host");

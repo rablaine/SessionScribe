@@ -31,8 +31,11 @@ const env = z.object({
   LAUGHTER_HIGH_THRESHOLD: z.coerce.number().min(0).max(1).default(0.15),
   LAUGHTER_LOW_THRESHOLD: z.coerce.number().min(0).max(1).default(0.05),
   LAUGHTER_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(240).default(60),
-  // Number of reverse proxies in front of Node whose X-Forwarded-For entry is trusted (Container Apps ingress: 1).
-  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(3).default(0),
+  // Which X-Forwarded-For hops to trust: "" (none), a hop count, or "private" (skip loopback/private-network
+  // hops, so the client is the rightmost public address; suits platform ingress with internal hops).
+  TRUST_PROXY: z.string().regex(/^(|[0-3]|private)$/).default(""),
+  // Diagnostics: log the shape of the forwarding chain (public/private per hop, no addresses) on sign-in.
+  LOG_FORWARDING: z.enum(["true", "false"]).default("false"),
   // WAL needs shared memory and is unsafe on SMB/NFS shares; use DELETE when DATA_DIR is a network mount.
   SQLITE_JOURNAL_MODE: z.enum(["WAL", "DELETE", "TRUNCATE"]).default("WAL"),
   // Self-service access requests create pending accounts. Off: only invitation links can register.
@@ -85,7 +88,8 @@ export const config = {
   laughterHighThreshold: env.LAUGHTER_HIGH_THRESHOLD,
   laughterLowThreshold: env.LAUGHTER_LOW_THRESHOLD,
   laughterTimeoutMs: env.LAUGHTER_TIMEOUT_MINUTES * 60_000,
-  trustProxyHops: env.TRUST_PROXY_HOPS,
+  trustProxy: env.TRUST_PROXY === "private" ? ["loopback", "linklocal", "uniquelocal"] : Number(env.TRUST_PROXY || 0),
+  logForwarding: env.LOG_FORWARDING === "true",
   sqliteJournalMode: env.SQLITE_JOURNAL_MODE,
   openSignup: env.APP_OPEN_SIGNUP === "true",
   retentionDays: env.RECORDING_RETENTION_DAYS,
@@ -103,8 +107,8 @@ const loopbackHost = /^(localhost|127\.0\.0\.1|\[::1\]|::1)$/;
 if (!loopbackHost.test(config.host) && !config.publicOrigin) {
   throw new Error("Binding to a non-loopback HOST requires APP_PUBLIC_ORIGIN (the exact public HTTPS origin).");
 }
-if (config.trustProxyHops && !config.publicOrigin) {
-  throw new Error("TRUST_PROXY_HOPS is only valid with APP_PUBLIC_ORIGIN behind a known reverse proxy.");
+if (config.trustProxy && !config.publicOrigin) {
+  throw new Error("TRUST_PROXY is only valid with APP_PUBLIC_ORIGIN behind a known reverse proxy.");
 }
 
 function applicationOrigin(value: string): string {
