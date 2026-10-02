@@ -32,6 +32,7 @@ function hiddenPassword(label: string): Promise<string> {
 
 const usage = `Usage:
   node dist/account-cli.js bootstrap --email you@example.com    create the first administrator (prompts for a password)
+  node dist/account-cli.js bootstrap-link --email you@example.com  create the first administrator and print a one-use link to set its password
   node dist/account-cli.js invite --email friend@example.com    whitelist an email and print a one-use invitation link
   node dist/account-cli.js reset-link --email user@example.com  print a one-use password-reset link (works for the admin too)
   node dist/account-cli.js delete-user --email user@example.com remove a non-admin account that owns no sessions`;
@@ -41,7 +42,7 @@ async function main() {
   // The original form "--email X" still means bootstrap.
   const [command, flag, email] = args[0] === "--email" ? ["bootstrap", ...args] : args;
   if (args.length !== (args[0] === "--email" ? 2 : 3) || flag !== "--email" || !email ||
-    !["bootstrap", "invite", "reset-link", "delete-user"].includes(command ?? "")) {
+    !["bootstrap", "bootstrap-link", "invite", "reset-link", "delete-user"].includes(command ?? "")) {
     throw new Error(`Usage:\n${usage}`);
   }
   const accounts = new Accounts({
@@ -57,8 +58,9 @@ async function main() {
       if (password !== confirmation) throw new Error("Passwords do not match.");
       await accounts.bootstrapAdministrator(email, password);
       process.stdout.write("Administrator created. Sign in through the application.\n");
-    } else if (command === "invite" || command === "reset-link") {
-      const link = command === "invite" ? accounts.operatorInvite(email) : accounts.operatorResetLink(email);
+    } else if (command === "invite" || command === "reset-link" || command === "bootstrap-link") {
+      const link = command === "invite" ? accounts.operatorInvite(email) :
+        command === "bootstrap-link" ? await accounts.operatorBootstrapLink(email) : accounts.operatorResetLink(email);
       process.stdout.write(`One-use link (expires ${link.expiresAt}). Share it privately:\n${link.url}\n`);
     } else {
       accounts.operatorDeleteUser(email);

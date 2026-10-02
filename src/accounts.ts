@@ -396,6 +396,14 @@ export class Accounts {
     if (!this.origin) throw new Error("Set APP_PUBLIC_ORIGIN so the link points at the right host.");
     return this.origin;
   }
+  // Creates the first administrator with an unguessable random password and returns a one-use link
+  // for them to choose their own, so no password is ever typed into a remote shell.
+  async operatorBootstrapLink(rawEmail: string): Promise<{ url: string; expiresAt: string }> {
+    const email = emailSchema.parse(rawEmail);
+    this.operatorOrigin();
+    await this.bootstrapAdministrator(email, token());
+    return this.operatorResetLink(email, 24 * 60 * 60 * 1000);
+  }
   operatorInvite(rawEmail: string): { url: string; expiresAt: string } {
     const email = emailSchema.parse(rawEmail);
     const origin = this.operatorOrigin(), raw = token(), expiresAt = Date.now() + INVITE_MS;
@@ -411,9 +419,9 @@ export class Accounts {
     });
     return { url: `${origin}/#invite=${raw}&email=${encodeURIComponent(email)}`, expiresAt: new Date(expiresAt).toISOString() };
   }
-  operatorResetLink(rawEmail: string): { url: string; expiresAt: string } {
+  operatorResetLink(rawEmail: string, lifetimeMs = RESET_MS): { url: string; expiresAt: string } {
     const email = emailSchema.parse(rawEmail);
-    const origin = this.operatorOrigin(), raw = token(), expiresAt = Date.now() + RESET_MS;
+    const origin = this.operatorOrigin(), raw = token(), expiresAt = Date.now() + lifetimeMs;
     this.transaction(() => {
       const user = this.emailUser(email);
       if (!user || !["active", "pending"].includes(user.status)) throw new Error("No active or pending account uses this email.");

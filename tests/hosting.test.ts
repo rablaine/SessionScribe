@@ -204,7 +204,10 @@ test("operator CLI methods issue invitation/reset links and delete only session-
   const root = await mkdtemp(path.join(os.tmpdir(), "scribe-operator-"));
   const accounts = new Accounts({ databasePath: path.join(root, "accounts.sqlite"), publicOrigin: "https://scribe.example.test" });
   try {
-    await accounts.bootstrapAdministrator(fixtureEmail, fixturePassword);
+    const setup = await accounts.operatorBootstrapLink(fixtureEmail);
+    assert.match(setup.url, /#reset=/);
+    assert.ok(Date.parse(setup.expiresAt) - Date.now() > 23 * 3_600_000);
+    await assert.rejects(accounts.operatorBootstrapLink("second@example.test"), /already exists/);
     const invite = accounts.operatorInvite(" Friend@Example.test ");
     assert.match(invite.url, /^https:\/\/scribe\.example\.test\/#invite=[A-Za-z0-9_-]{43}&email=friend%40example\.test$/);
     assert.match(accounts.operatorResetLink(fixtureEmail).url, /^https:\/\/scribe\.example\.test\/#reset=[A-Za-z0-9_-]{43}$/);
