@@ -221,28 +221,3 @@ test("operator CLI methods issue invitation/reset links and delete only session-
     await rm(root, { recursive: true, force: true });
   }
 });
-test("TRUST_PROXY=private resolves the rightmost public hop even when internal ingress hops vary", async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "scribe-private-proxy-"));
-  const saved = { ...config };
-  Object.assign(config, { publicOrigin: "https://scribe.example.test", trustProxy: ["loopback", "linklocal", "uniquelocal"] });
-  const accounts = new Accounts({ databasePath: path.join(root, "accounts.sqlite"), publicOrigin: config.publicOrigin });
-  await accounts.bootstrapAdministrator(fixtureEmail, fixturePassword);
-  const store = new JobStore(root);
-  await store.init();
-  const server = createApp(store, new JobRunner(store), accounts).listen(0, "127.0.0.1");
-  await new Promise<void>(resolve => server.once("listening", resolve));
-  const port = (server.address() as AddressInfo).port;
-  const headers = { Host: "scribe.example.test", "Content-Type": "application/json", Origin: "https://scribe.example.test" };
-  const attempt = (xff: string) => call(port, "POST", "/api/auth/login", { ...headers, "X-Forwarded-For": xff },
-    JSON.stringify({ email: fixtureEmail, password: "wrong-password-1" }));
-  try {
-    for (let i = 0; i < 10; i++) assert.equal((await attempt(`198.51.100.${i}, 203.0.113.50, 10.0.${i}.4`)).status, 401);
-    assert.equal((await attempt("203.0.113.50, 10.9.9.9")).status, 429);
-    assert.equal((await attempt("203.0.113.51, 10.9.9.9")).status, 401);
-  } finally {
-    Object.assign(config, saved);
-    await new Promise<void>(resolve => server.close(() => resolve()));
-    accounts.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});

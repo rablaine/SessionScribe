@@ -21,7 +21,8 @@ RUN python3 -m venv /opt/detector \
 COPY detector ./detector
 # Model is downloaded and SHA-256 verified at build time, never at runtime.
 RUN /opt/detector/bin/python detector/download_model.py --destination detector/models/yamnet \
- && rm -rf detector/__pycache__
+ && rm -rf detector/__pycache__ \
+ && chmod -R a+rX detector
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./

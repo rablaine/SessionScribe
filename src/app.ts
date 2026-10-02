@@ -13,6 +13,7 @@ import { clipFilename, extractAudioClip, recordingFormat } from "./audio.js";
 import { AccountError, Accounts } from "./accounts.js";
 import { uploadErrorStatus, Uploads } from "./uploads.js";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { Waveforms } from "./waveform.js";
 
 const publicDirectory = fileURLToPath(new URL("../public/", import.meta.url));
@@ -25,7 +26,9 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
   if (config.logForwarding) {
     app.use("/api/auth/login", (req, _res, next) => {
       const chain = (req.get("x-forwarded-for") ?? "").split(",").map(value => value.trim()).filter(Boolean);
-      const kind = (ip: string) => /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::1$|f[cd]|fe80)/i.test(ip) ? "private" : "public";
+      // Class plus a short one-way fingerprint per hop: enough to see which hop is stable, no addresses logged.
+      const kind = (ip: string) => `${/^(::ffff:)?(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)|^(::1$|f[cd]|fe80)/i.test(ip) ? "private" :
+        /^(::ffff:)?100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip) ? "cgnat" : "public"}:${createHash("sha256").update(ip).digest("hex").slice(0, 6)}`;
       console.log(`Forwarding diagnostics: socket=${kind(req.socket.remoteAddress ?? "")} chain=[${chain.map(kind).join(", ")}] resolved=${kind(req.ip ?? "")}`);
       next();
     });
