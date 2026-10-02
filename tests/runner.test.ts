@@ -1,0 +1,249 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm, access } from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
+import { AzureSpeech } from "../src/azure.js";
+import { runTool, inspectRecording } from "../src/audio.js";
+import { config } from "../src/config.js";
+import { createDemo } from "../src/demo.js";
+import { type Job } from "../src/domain.js";
+import { JobRunner } from "../src/runner.js";
+import { JobStore } from "../src/store.js";
+import type { LaughterDetection } from "../src/laughter.js";
+
+class FakeSpeech extends AzureSpeech {
+  uploads = 0;
+  submissions = 0;
+  cleanupCalls = 0;
+  async upload(file: string, _blobName: string) {
+    await access(file);
+    this.uploads++;
+    return "https://fixture.blob.core.windows.net/audio.mp3";
+  }
+
+  async submit(_job: Job, _url: string) {
+    this.submissions++;
+    return "https://fixture.cognitiveservices.azure.com/speechtotext/transcriptions/fixture";
+  }
+  async waitForTranscript(_url: string, onStatus: (status: string) => Promise<void>) {
+    await onStatus("Running");
+    return { segments: createDemo().segments, warnings: [] };
+  }
+  async cleanup(_job: Job) { this.cleanupCalls++; return []; }
+}
+
+const noLaughter: LaughterDetection = {
+  enabled: true,
+  async detect() {
+    return { schemaVersion: 1, model: "yamnet", modelVersion: "1", profileVersion: "test", events: [] };
+  },
+};
+
+async function wait(runner: JobRunner, id: string) {
+  const deadline = Date.now() + 15_000;
+  while (runner.busyIds.has(id)) {
+    if (Date.now() > deadline) throw new Error("Worker test timed out.");
+    await delay(20);
+  }
+}
+
+test("worker: actual MP3 mixdown, persisted transcript, recap failure/retry, saved-job resume and cleanup", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dnd-worker-test-"));
+  const originalConfig = { ...config };
+  Object.assign(config, {
+    speechEndpoint: "https://fixture.cognitiveservices.azure.com",
+    storageAccountUrl: "https://fixture.blob.core.windows.net", openaiEndpoint: "https://fixture.openai.azure.com",
+    openaiDeployment: "fixture", authMode: "azure-cli",
+  });
+  try {
+    const store = new JobStore(root);
+    await store.init();
+    const speech = new FakeSpeech();
+    const job = {
+      ...createDemo(), demo: false, status: "queued" as const, segments: [], recap: undefined,
+      laughter: { status: "pending" as const, events: [] },
+    };
+    await store.save(job);
+    await runTool(config.ffmpeg, [
+      "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-ac", "2", "-codec:a", "libmp3lame", store.audioPath(job.id),
+    ], 10_000);
+    assert((await inspectRecording(config.ffprobe, store.audioPath(job.id), job.originalName)) > 0);
+    const failedRecapRunner = new JobRunner(store, speech, async () => { throw new Error("Fixture recap failure"); }, noLaughter);
+    failedRecapRunner.enqueue(job.id);
+    await wait(failedRecapRunner, job.id);
+    assert.equal(store.get(job.id)!.status, "transcript_ready");
+    assert.equal(store.get(job.id)!.segments.length, 8);
+    assert.equal(store.get(job.id)!.laughter.status, "completed");
+    assert.equal(store.get(job.id)!.error, "Fixture recap failure");
+    assert.equal(speech.uploads, 1);
+    assert.equal(speech.submissions, 1);
+    await access(store.audioPath(job.id));
+    assert.equal(store.get(job.id)!.audioRetained, true);
+    await assert.rejects(access(store.monoPath(job.id)), /ENOENT/);
+    const retry = new JobRunner(store, speech, async () => createDemo().recap!, noLaughter);
+    retry.enqueue(job.id);
+    await wait(retry, job.id);
+    assert.equal(store.get(job.id)!.status, "completed");
+    assert.equal(store.get(job.id)!.error, undefined);
+    assert.equal(speech.submissions, 1, "recap retry must not retranscribe");
+
+    const resumed = {
+      ...createDemo(), demo: false, status: "transcribing" as const, segments: [], recap: undefined,
+      speechJobUrl: "https://fixture.cognitiveservices.azure.com/speechtotext/transcriptions/saved",
+    };
+    await store.save(resumed);
+    const resume = new JobRunner(store, speech, async () => createDemo().recap!, noLaughter);
+    resume.enqueue(resumed.id);
+    await wait(resume, resumed.id);
+    assert.equal(store.get(resumed.id)!.status, "completed");
+    assert.equal(speech.submissions, 1, "saved Azure jobs must be polled, not resubmitted");
+    const reloaded = new JobStore(root);
+    await reloaded.init();
+    assert.equal(reloaded.get(job.id)!.status, "completed");
+    assert.equal(reloaded.get(resumed.id)!.recap!.title, "The Lantern Below");
+  } finally {
+    Object.assign(config, originalConfig);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("standalone laughter analysis preserves completed transcript and recap state", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dnd-laughter-worker-test-"));
+  try {
+    const store = new JobStore(root);
+    await store.init();
+    const job = await store.save({ ...createDemo(), demo: false, audioRetained: true,
+      laughter: { status: "queued", events: [] } });
+    await runTool(config.ffmpeg, [
+      "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-codec:a", "libmp3lame", store.audioPath(job.id),
+    ], 10_000);
+    const detector: LaughterDetection = {
+      enabled: true,
+      async detect(_audio, durationMs) {
+        assert.equal(durationMs, job.durationMs);
+        return {
+          schemaVersion: 1, model: "yamnet", modelVersion: "1", profileVersion: "test",
+          events: [{
+            id: "L00001", startMs: 1000, endMs: 2000, peakMs: 1500,
+            peakConfidence: 0.8, meanConfidence: 0.6,
+            labels: [{ name: "Laughter", peakConfidence: 0.8 }],
+          }],
+        };
+      },
+    };
+    const runner = new JobRunner(store, new FakeSpeech(), async () => job.recap!, detector);
+    runner.enqueueLaughter(job.id);
+    await wait(runner, job.id);
+    const updated = store.get(job.id)!;
+    assert.equal(updated.status, "completed");
+    assert.deepEqual(updated.recap, job.recap);
+    assert.equal(updated.stage, job.stage);
+    assert.equal(updated.laughter.status, "completed");
+    assert.equal(updated.laughter.events[0]!.startMs, 1000);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("recap regeneration preserves stale recap on failure and clears dirty marker only after success", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dnd-recap-dirty-test-"));
+  const originalConfig = { ...config };
+  Object.assign(config, {
+    openaiEndpoint: "https://fixture.openai.azure.com", openaiDeployment: "fixture", authMode: "azure-cli",
+  });
+  try {
+    const store = new JobStore(root);
+    const job = await store.save({ ...createDemo(), demo: false, recapStale: true, status: "transcript_ready" });
+    const speech = new FakeSpeech();
+    const failed = new JobRunner(store, speech, async () => { throw new Error("Fixture regeneration failure"); }, noLaughter);
+    failed.enqueue(job.id);
+    await wait(failed, job.id);
+    assert.deepEqual(store.get(job.id)!.recap, job.recap);
+    assert.equal(store.get(job.id)!.recapStale, true);
+    const replacement = { ...createDemo().recap!, title: "Regenerated recap" };
+    const retry = new JobRunner(store, speech, async () => replacement, noLaughter);
+    retry.enqueue(job.id);
+    await wait(retry, job.id);
+    assert.deepEqual(store.get(job.id)!.recap, replacement);
+    assert.equal(store.get(job.id)!.recapStale, false);
+    assert.equal(speech.uploads, 0);
+    assert.equal(speech.submissions, 0);
+    const reloaded = new JobStore(root);
+    await reloaded.init();
+    assert.equal(reloaded.get(job.id)!.recapStale, false);
+  } finally {
+    Object.assign(config, originalConfig);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("worker accepts actual stereo Ogg Opus, retains original playback audio, and cleans normalized audio", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dnd-opus-worker-test-"));
+  const originalConfig = { ...config };
+  Object.assign(config, {
+    speechEndpoint: "https://fixture.cognitiveservices.azure.com",
+    storageAccountUrl: "https://fixture.blob.core.windows.net",
+    openaiEndpoint: "https://fixture.openai.azure.com", openaiDeployment: "fixture", authMode: "azure-cli",
+  });
+  try {
+    const store = new JobStore(root);
+    await store.init();
+    const job = {
+      ...createDemo(), originalName: "party.OPUS", demo: false, status: "queued" as const,
+      segments: [], recap: undefined, warnings: [],
+    };
+    await store.save(job);
+    await runTool(config.ffmpeg, [
+      "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-ar", "48000", "-ac", "2", "-codec:a", "libopus", "-f", "ogg", store.audioPath(job.id),
+    ], 10_000);
+    assert((await inspectRecording(config.ffprobe, store.audioPath(job.id), job.originalName)) > 0);
+    const speech = new FakeSpeech();
+    speech.upload = async (file: string) => {
+      const metadata = JSON.parse(await runTool(config.ffprobe, [
+        "-v", "error", "-show_entries", "format=format_name:stream=codec_name,channels,sample_rate",
+        "-of", "json", file,
+      ], 10_000));
+      assert.equal(metadata.format.format_name, "mp3");
+      assert.equal(metadata.streams[0].codec_name, "mp3");
+      assert.equal(metadata.streams[0].channels, 1);
+      assert.equal(metadata.streams[0].sample_rate, "16000");
+      speech.uploads++;
+      return "https://fixture.blob.core.windows.net/audio.mp3";
+    };
+    const runner = new JobRunner(store, speech, async () => createDemo().recap!, noLaughter);
+    runner.enqueue(job.id);
+    await wait(runner, job.id);
+    assert.equal(store.get(job.id)!.status, "completed");
+    assert.equal(store.get(job.id)!.originalName, "party.OPUS");
+    assert.equal(speech.uploads, 1);
+    assert.equal(speech.submissions, 1);
+    assert.deepEqual(store.get(job.id)!.warnings, []);
+    await access(store.audioPath(job.id));
+    assert.equal(store.get(job.id)!.audioRetained, true);
+    await assert.rejects(access(store.monoPath(job.id)), /ENOENT/);
+
+    const renamedMp3 = {
+      ...createDemo(), originalName: "renamed.opus", demo: false, status: "queued" as const,
+      segments: [], recap: undefined, audioRetained: true,
+    };
+    await store.save(renamedMp3);
+    await runTool(config.ffmpeg, [
+      "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-codec:a", "libmp3lame", store.audioPath(renamedMp3.id),
+    ], 10_000);
+    runner.enqueue(renamedMp3.id);
+    await wait(runner, renamedMp3.id);
+    assert.equal(store.get(renamedMp3.id)!.status, "failed");
+    assert.match(store.get(renamedMp3.id)!.error!, /not a valid Ogg Opus/);
+    assert.equal(speech.uploads, 1, "mislabeled recordings must be rejected before cloud upload");
+    await access(store.audioPath(renamedMp3.id));
+  } finally {
+    Object.assign(config, originalConfig);
+    await rm(root, { recursive: true, force: true });
+  }
+});

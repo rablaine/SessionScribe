@@ -1,0 +1,13 @@
+{
+  "rules": [
+    {
+      "enabled": true,
+      "name": "delete-temporary-audio-after-three-days",
+      "type": "Lifecycle",
+      "definition": {
+        "filters": { "blobTypes": ["blockBlob"], "prefixMatch": ["dnd-audio/"] },
+        "actions": { "baseBlob": { "delete": { "daysAfterModificationGreaterThan": 3 } } }
+      }
+    }
+  ]
+}

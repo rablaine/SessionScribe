@@ -1,0 +1,24 @@
+node_modules/
+.venv/
+dist/
+data/
+.env
+.env.*
+!.env.example
+.secrets/
+*.pem
+*.pfx
+*.key
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.mp3
+*.opus
+*.ogg
+*.log
+
+# Private operational notes and real deployment parameters (never publish)
+.private/
+infra/*.local.*
+

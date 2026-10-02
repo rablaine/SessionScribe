@@ -1,0 +1,16 @@
+{
+  "identifierUris": ["api://<gateway-api-client-id>"],
+  "api": {
+    "requestedAccessTokenVersion": 2
+  },
+  "appRoles": [
+    {
+      "allowedMemberTypes": ["Application"],
+      "description": "Upload and delete temporary DND recording audio through the storage gateway.",
+      "displayName": "Manage temporary audio",
+      "id": "<new-random-guid-for-app-role>",
+      "isEnabled": true,
+      "value": "Audio.Manage"
+    }
+  ]
+}

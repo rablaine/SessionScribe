@@ -1,0 +1,4 @@
+[
+  { "category": "NspPublicInboundPerimeterRulesAllowed", "enabled": true },
+  { "category": "NspPublicInboundPerimeterRulesDenied", "enabled": true }
+]

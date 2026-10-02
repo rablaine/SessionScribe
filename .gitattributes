@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.mp3 binary
+*.opus binary
+*.ogg binary

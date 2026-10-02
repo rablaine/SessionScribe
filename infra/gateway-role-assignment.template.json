@@ -1,0 +1,5 @@
+{
+  "principalId": "<caller-service-principal-object-id>",
+  "resourceId": "<gateway-api-service-principal-object-id>",
+  "appRoleId": "<app-role-id-from-gateway-api>"
+}
