@@ -72,6 +72,11 @@ Invariants:
 - `SQLITE_JOURNAL_MODE=DELETE` and SMB `mountOptions` with `nobrl` (in `deploy.ps1`). Never WAL on the share.
 - `TRUST_PROXY=1`. Container Apps ingress appends the real client IP as the **last** `X-Forwarded-For` entry,
   verified in production with `LOG_FORWARDING=true`. Other values resolve to the ingress pod, not the client.
+- Processing concurrency (`src/runner.ts`): `MAX_ACTIVE_JOBS` sessions in flight. CPU-heavy steps share
+  `runner.cpu` (one at a time on 1 vCPU) and recaps share `runner.recapSlots` (2). Laughter and waveform run during
+  the Speech wait. All job writes from the runner go through `store.mutate`, because parallel branches touch the same
+  job; never use a stale `store.get` and then `save`. Raising the container's vCPU count would justify a larger CPU
+  semaphore.
 - Speech/OpenAI use the user-assigned managed identity (`AZURE_AUTH_MODE=managed-identity`).
 - The recap deployment uses the custom content filter `session-scribe-fantasy-violence`: violence and hate are blocked
   only at High (fantasy combat; the DM's self-deprecating in-group humor), and everything else is default. It's created

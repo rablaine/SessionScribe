@@ -17,6 +17,8 @@ export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 export const CHUNK_BYTES = 8 * 1024 * 1024;
 const STALE_UPLOAD_MS = 6 * 60 * 60 * 1000;
 const MAX_ACTIVE_UPLOADS = 3;
+// Sessions processing or waiting to process. Several run side by side; the rest wait their turn.
+const MAX_QUEUED_SESSIONS = 20;
 
 const startSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -121,7 +123,7 @@ export class Uploads {
         if (active.some(upload => upload.ownerId === ownerId)) {
           throw new UploadError(409, "Finish or cancel your current upload before starting another.");
         }
-        if (active.length >= MAX_ACTIVE_UPLOADS || this.runner.busyIds.size >= 5) {
+        if (active.length >= MAX_ACTIVE_UPLOADS || this.runner.busyIds.size >= MAX_QUEUED_SESSIONS) {
           throw new UploadError(429, "The server is busy with other uploads. Try again in a few minutes.");
         }
         const today = this.accounts.usageSince(ownerId, "upload", Date.now() - 86_400_000);
@@ -216,7 +218,7 @@ export class Uploads {
           throw new UploadError(400, message);
         }
         if (!this.accounts.isActiveUser(ownerId)) throw new UploadError(403, "Your account no longer has access.");
-        if (this.runner.busyIds.size >= 5) throw new UploadError(429, "The processing queue is full. Try finishing the import again in a few minutes.");
+        if (this.runner.busyIds.size >= MAX_QUEUED_SESSIONS) throw new UploadError(429, "The processing queue is full. Try finishing the import again in a few minutes.");
         this.accounts.consumeQuota(ownerId, "audio-ms", durationMs, config.quotas.audioMs,
           `Daily audio limit reached (${config.quotas.audioMs / 3_600_000} hours per 24 hours). Try again later.`);
         this.accounts.consumeQuota(ownerId, "upload", 1, config.quotas.uploads,

@@ -26,8 +26,13 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
   the recap deployment a custom content filter that blocks violence and hate only at **High** severity, so fantasy combat
   and in-group/self-deprecating table humor aren't filtered. Sexual, self-harm, jailbreak and protected-material filters
   keep their defaults.
-- **Progress for long-running work.** Processing, recap regeneration and laughter re-runs show a checklist of steps
-  (completed with durations, the current one, and what's next) and an estimated progress bar with time remaining.
+- **Sessions process side by side.** Up to six sessions run at once. CPU-heavy steps (audio conversion, laughter
+  detection, waveform building) take turns on the single vCPU, and recap writing allows two at a time. While Azure
+  transcribes a session, its laughter detection and waveform run in parallel instead of first, and other sessions
+  keep moving. A long recording no longer holds up a short one.
+- **Progress for long-running work.** Processing, recap regeneration and laughter re-runs show the full checklist of
+  steps (done with durations, in progress, and still to come), what each step unlocks (laughter index, clip-editor
+  waveform, transcript and exports, recap), a "Not ready yet: …" banner, and an estimated progress bar with time remaining.
   Estimates come from `DATA_DIR/stage-timings.json`, which learns each stage's fixed overhead and per-audio-minute
   cost from recent runs. The server also logs every stage's duration. Completed steps are real; the current step's
   fill is an estimate (recap writing reports real chunk progress).
@@ -233,10 +238,10 @@ Names must match the runner's lowercase UUID shape: `xxxxxxxx-xxxx-xxxx-xxxx-xxx
 
 ### Workflow
 
-1. Get permission from everyone recorded.
+1. Get permission from everyone recorded. (You confirm this once, at sign-up or on your first import.)
 2. From **Your sessions**, choose **Import recording** and upload an MP3 or Ogg Opus file (`.opus` or `.ogg`) with a session title, known language, and upper bound on speakers. Start with the actual number of players + DM, plus a little headroom. Accepted imports open the review workspace; failed uploads keep the dialog and your fields with a visible error.
 3. Optionally supply character/NPC/location names. This helps **recap spelling only**, not the Speech model. It must not be used as evidence that an event occurred.
-4. Wait. Batch transcription can take minutes to hours. One local worker runs jobs sequentially; up to five processing/queued jobs are accepted.
+4. Wait. Batch transcription can take minutes to hours. The checklist above the transcript shows every step, what it unlocks, and an estimate. Several sessions process at once, and up to 20 can be queued.
 5. Review speaker labels and low-confidence phrases. Names cannot be inferred reliably from anonymous mixed audio; rename them manually. Changed names mark an existing recap out of date but do not delete it.
 6. Use the bottom player and timestamp buttons to check phrases against the original recording. Click Edit text / speaker, select the entry's speaker, correct its text, then Save. Delete entry removes only that speaker/phrase pair after confirmation, not the session or recording. Remaining timings, IDs, and order stay unchanged. Unsaved edits must be saved or discarded before switching sessions.
 7. Saved changes keep the recap and mark it **Out of date**, with a shortcut to Review / Regenerate recap. A successful regeneration replaces it and clears the marker; failure keeps the previous recap. Deleted evidence references are marked unavailable instead of linked to another phrase. Recap Markdown exports carry the same out-of-date warning. The fictional demo cannot generate a new cloud recap.

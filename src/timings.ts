@@ -10,6 +10,7 @@ const DEFAULTS: Record<ProgressStepKey, { baseMs: number; perAudioMinuteMs: numb
   upload: { baseMs: 2_000, perAudioMinuteMs: 150 },
   submit: { baseMs: 3_000, perAudioMinuteMs: 0 },
   laughter: { baseMs: 10_000, perAudioMinuteMs: 1_500 },
+  waveform: { baseMs: 3_000, perAudioMinuteMs: 400 },
   transcribe: { baseMs: 60_000, perAudioMinuteMs: 12_000 },
   recap: { baseMs: 20_000, perAudioMinuteMs: 3_000 },
   cleanup: { baseMs: 2_000, perAudioMinuteMs: 0 },

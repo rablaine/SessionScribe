@@ -81,10 +81,10 @@ test("worker: actual MP3 mixdown, persisted transcript, recap failure/retry, sav
     assert.equal(failedRun.outcome, "failed");
     assert.ok(failedRun.finishedAt);
     assert.deepEqual(failedRun.steps.map(step => `${step.key}:${step.status}`), [
-      "prepare:done", "upload:done", "submit:done", "laughter:done", "transcribe:done", "recap:failed", "cleanup:done"]);
+      "prepare:done", "upload:done", "submit:done", "laughter:done", "waveform:done", "transcribe:done", "recap:failed", "cleanup:done"]);
     assert.ok(failedRun.steps.every(step => step.estimateMs > 0));
     const timings = JSON.parse(await readFile(path.join(root, "stage-timings.json"), "utf8"));
-    assert.deepEqual(Object.keys(timings).sort(), ["cleanup", "laughter", "prepare", "submit", "transcribe", "upload"]);
+    assert.deepEqual(Object.keys(timings).sort(), ["cleanup", "laughter", "prepare", "submit", "transcribe", "upload", "waveform"]);
     assert.equal(store.get(job.id)!.status, "transcript_ready");
     assert.equal(store.get(job.id)!.segments.length, 8);
     assert.equal(store.get(job.id)!.laughter.status, "completed");
@@ -279,4 +279,62 @@ test("recap progress messages map to monotonic sub-progress, and stage timings l
   assert.equal(await timings.estimate("transcribe", 2 * hour), 11 * 60_000);
   await timings.record("submit", 4000, hour);
   assert.equal(await timings.estimate("submit", 3 * hour), 4000, "fixed-cost stages do not scale with length");
+});
+test("sessions run side by side: a long Azure wait doesn't block a short session, and laughter runs during the wait", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dnd-concurrency-test-"));
+  const originalConfig = { ...config };
+  Object.assign(config, {
+    speechEndpoint: "https://fixture.cognitiveservices.azure.com",
+    storageAccountUrl: "https://fixture.blob.core.windows.net", openaiEndpoint: "https://fixture.openai.azure.com",
+    openaiDeployment: "fixture", authMode: "azure-cli",
+  });
+  try {
+    const store = new JobStore(root);
+    await store.init();
+    let releaseLong!: () => void;
+    const longWait = new Promise<void>(resolve => { releaseLong = resolve; });
+    let laughterDuringLongWait = false;
+    let cpuOverlap = 0, cpuActive = 0;
+    class GatedSpeech extends FakeSpeech {
+      async waitForTranscript(url: string, onStatus: (status: string) => Promise<void>) {
+        if (url.endsWith("/long")) await longWait;
+        return super.waitForTranscript(url, onStatus);
+      }
+      async submit(job: Job, _url: string) { return `https://fixture.cognitiveservices.azure.com/speechtotext/transcriptions/${job.title}`; }
+    }
+    const trackingLaughter: LaughterDetection = {
+      enabled: true,
+      async detect() {
+        cpuActive++; cpuOverlap = Math.max(cpuOverlap, cpuActive);
+        await delay(30);
+        cpuActive--;
+        laughterDuringLongWait ||= !store.list().find(job => job.title === "long")?.segments.length;
+        return { schemaVersion: 1, model: "yamnet", modelVersion: "1", profileVersion: "test", events: [] };
+      },
+    };
+    const runner = new JobRunner(store, new GatedSpeech(), async () => createDemo().recap!, trackingLaughter);
+    const make = async (title: string) => {
+      const job = await store.save({ ...createDemo(), demo: false, title, status: "queued" as const, segments: [], recap: undefined,
+        audioRetained: true, laughter: { status: "pending" as const, events: [] } });
+      await runTool(config.ffmpeg, ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+        "-codec:a", "libmp3lame", store.audioPath(job.id)], 10_000);
+      return job;
+    };
+    const long = await make("long");
+    const short = await make("short");
+    runner.enqueue(long.id);
+    runner.enqueue(short.id);
+    await wait(runner, short.id);
+    assert.equal(store.get(short.id)!.status, "completed", "the short session finishes while the long one waits on Azure");
+    assert.equal(runner.busyIds.has(long.id), true);
+    assert.equal(store.get(long.id)!.laughter.status, "completed", "laughter ran during the Azure wait");
+    assert.equal(laughterDuringLongWait, true);
+    releaseLong();
+    await wait(runner, long.id);
+    assert.equal(store.get(long.id)!.status, "completed");
+    assert.equal(cpuOverlap, 1, "CPU-heavy steps never overlap");
+  } finally {
+    Object.assign(config, originalConfig);
+    await rm(root, { recursive: true, force: true });
+  }
 });

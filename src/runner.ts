@@ -14,11 +14,15 @@ type QueueItem = { id: string; operation: "process" | "recap" | "laughter" };
 // Speech output can be slightly longer than container metadata; differences beyond this are charged.
 const DURATION_TOLERANCE_MS = 10_000;
 const MAX_TRANSCRIPTION_MS = 4 * 60 * 60 * 1000;
+// Sessions processed side by side. Most of a session's wall time is spent waiting on Azure Speech, which uses no
+// local resources, so several can be in flight while CPU-heavy steps take turns (see JobRunner.cpu).
+export const MAX_ACTIVE_JOBS = 6;
 const STEP_LABELS: Record<ProgressStepKey, string> = {
   prepare: "Check recording and mix to mono",
   upload: "Upload audio for transcription",
   submit: "Submit to Azure Speech",
   laughter: "Detect laughter",
+  waveform: "Build the clip editor waveform",
   transcribe: "Transcribe and identify speakers",
   recap: "Write the session recap",
   cleanup: "Clean up temporary files",
@@ -34,18 +38,38 @@ export function recapFraction(stage: string): number | undefined {
   return /^Writing/.test(stage) ? 0.9 : undefined;
 }
 
+export class Semaphore {
+  private waiting: Array<() => void> = [];
+  constructor(private available: number) {}
+  get busy() { return this.available === 0; }
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    if (this.available > 0) this.available--;
+    else await new Promise<void>(resolve => this.waiting.push(resolve));
+    try { return await work(); }
+    finally {
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.available++;
+    }
+  }
+}
+
 export class JobRunner {
   private queue: QueueItem[] = [];
-  private running = false;
+  private active = 0;
   private stopped = false;
   private criticalSections = 0;
   readonly busyIds = new Set<string>();
+  // One CPU-heavy step at a time (FFmpeg conversion, YAMNet, waveform decode): the host has a single vCPU.
+  readonly cpu = new Semaphore(1);
+  // Recap generation is network-bound but token-hungry; two at once stays well inside the deployment's rate limit.
+  readonly recapSlots = new Semaphore(2);
   // Set by the server: queued work for suspended/removed owners must not keep spending Azure money.
   canProcess: (id: string) => boolean = () => true;
   // Set by the server: charges decoded audio beyond the declared duration to the owner's quota (throws when over).
   chargeExtraAudio: (id: string, extraMs: number) => void = () => {};
-  // Set by the server: runs after a processing run ends (used to pre-build the clip editor's waveform).
-  afterRun: (id: string) => void = () => {};
+  // Set by the server: builds and caches the clip editor's waveform for a session's original recording.
+  buildWaveform: (id: string) => Promise<void> = async () => {};
   private reserved = new Set<string>();
   // Learned stage durations; the server points this at DATA_DIR so estimates improve over time.
   timings = new StageTimings();
@@ -86,15 +110,31 @@ export class JobRunner {
     else if (this.busyIds.has(id)) throw new Error("Job is already processing.");
     this.busyIds.add(id);
     this.queue.push({ id, operation });
-    void this.drain().catch(error => {
-      console.error("Job queue persistence failure; restart the server after checking disk access.", error);
-    });
+    this.pump();
   }
 
+  private pump() {
+    while (!this.stopped && this.active < MAX_ACTIVE_JOBS && this.queue.length) {
+      const { id, operation } = this.queue.shift()!;
+      this.active++;
+      void (async () => {
+        try {
+          if (operation === "laughter") await this.processLaughter(id);
+          else await this.process(id, operation === "recap");
+        } catch (error) {
+          console.error(`Session ${id} processing stopped unexpectedly; check disk access and restart if it persists.`, error);
+        } finally {
+          this.busyIds.delete(id);
+          this.active--;
+          this.pump();
+        }
+      })();
+    }
+  }
+
+  // Atomic against the latest saved state: parallel branches of one session must not overwrite each other.
   private async update(id: string, patch: Partial<Job>) {
-    const current = this.store.get(id);
-    if (!current) throw new Error("Processing job disappeared.");
-    return this.store.save({ ...current, ...patch });
+    return this.store.mutate(id, () => patch);
   }
 
   get inCriticalSection() { return this.criticalSections > 0; }
@@ -115,10 +155,11 @@ export class JobRunner {
     return !!this.store.get(id)?.progress?.steps.some(step => step.key === key && statuses.includes(step.status));
   }
   private async stepUpdate(id: string, key: ProgressStepKey, patch: Partial<ProgressStep>, jobPatch: Partial<Job> = {}) {
-    const progress = this.store.get(id)?.progress;
-    if (!progress?.steps.some(step => step.key === key)) return this.update(id, jobPatch);
-    const steps = progress.steps.map(step => step.key === key ? { ...step, ...patch } : step);
-    return this.update(id, { ...jobPatch, progress: { ...progress, steps } });
+    return this.store.mutate(id, job => {
+      const progress = job.progress;
+      if (!progress?.steps.some(step => step.key === key)) return jobPatch;
+      return { ...jobPatch, progress: { ...progress, steps: progress.steps.map(step => step.key === key ? { ...step, ...patch } : step) } };
+    });
   }
   private async startStep(id: string, key: ProgressStepKey, jobPatch: Partial<Job> = {}) {
     const resumed = this.hasStep(id, key, "running");
@@ -127,7 +168,7 @@ export class JobRunner {
     return this.stepUpdate(id, key, resumed ? {} : { status: "running", startedAt: new Date().toISOString(),
       endedAt: undefined, detail: undefined, fraction: undefined }, jobPatch);
   }
-  private async endStep(id: string, key: ProgressStepKey, status: "done" | "failed" | "skipped", jobPatch: Partial<Job> = {}) {
+  private async endStep(id: string, key: ProgressStepKey, status: "done" | "failed" | "skipped", jobPatch: Partial<Job> = {}, detail?: string) {
     const started = this.stepStarts.get(`${id}:${key}`);
     this.stepStarts.delete(`${id}:${key}`);
     if (status === "done" && started !== undefined) {
@@ -137,37 +178,27 @@ export class JobRunner {
       await this.timings.record(key, elapsedMs, audioMs);
     }
     return this.stepUpdate(id, key, { status, endedAt: new Date().toISOString(),
-      ...(status === "done" ? { fraction: 1 } : {}) }, jobPatch);
+      ...(status === "done" ? { fraction: 1, detail: undefined } : {}), ...(detail ? { detail } : {}) }, jobPatch);
   }
   private async finishRun(id: string, outcome: "completed" | "failed") {
-    const progress = this.store.get(id)?.progress;
-    if (!progress || progress.finishedAt) return;
-    const now = new Date().toISOString();
-    const steps = progress.steps.map(step => step.status === "running"
-      ? { ...step, status: outcome === "failed" ? "failed" as const : "done" as const, endedAt: now } : step);
-    await this.update(id, { progress: { ...progress, steps, finishedAt: now, outcome } });
+    await this.store.mutate(id, job => {
+      const progress = job.progress;
+      if (!progress || progress.finishedAt) return {};
+      const now = new Date().toISOString();
+      const steps = progress.steps.map(step => step.status === "running"
+        ? { ...step, status: outcome === "failed" ? "failed" as const : "done" as const, endedAt: now } : step);
+      return { progress: { ...progress, steps, finishedAt: now, outcome } };
+    });
+  }
+
+  // Runs a CPU-heavy step when the CPU is free, telling the user if it is waiting behind another session.
+  private async withCpu<T>(id: string, key: ProgressStepKey, work: () => Promise<T>): Promise<T> {
+    if (this.cpu.busy) await this.stepUpdate(id, key, { detail: "Waiting for another session's audio work to finish" });
+    return this.cpu.run(work);
   }
 
   // Stop taking new work. In-flight work is abandoned at process exit and resumed from persisted state.
   stop() { this.stopped = true; }
-
-  private async drain() {
-    if (this.running) return;
-    this.running = true;
-    try {
-      while (this.queue.length && !this.stopped) {
-        const { id, operation } = this.queue.shift()!;
-        try {
-          if (operation === "laughter") await this.processLaughter(id);
-          else await this.process(id, operation === "recap");
-        } finally {
-          this.busyIds.delete(id);
-        }
-      }
-    } finally {
-      this.running = false;
-    }
-  }
 
   private async detectLaughter(job: Job, updateStage: boolean): Promise<Job> {
     if (job.demo || job.laughter.status === "completed" || job.laughter.status === "skipped") {
@@ -184,28 +215,60 @@ export class JobRunner {
       });
     }
     const durationMs = job.durationMs;
-    job = await this.startStep(job.id, "laughter", {
-      ...(updateStage ? { stage: "Detecting laughter with YAMNet" } : {}),
-      laughter: { ...job.laughter, status: "running", error: undefined },
+    const id = job.id;
+    return this.withCpu(id, "laughter", async () => {
+      const started = await this.startStep(id, "laughter", {
+        ...(updateStage ? { stage: "Detecting laughter with YAMNet" } : {}),
+        laughter: { ...job.laughter, status: "running", error: undefined },
+      });
+      try {
+        const result = await this.laughter.detect(this.store.audioPath(id), durationMs);
+        return this.endStep(id, "laughter", "done", {
+          laughter: {
+            status: "completed",
+            events: result.events,
+            model: result.model,
+            modelVersion: result.modelVersion,
+            profileVersion: result.profileVersion,
+            completedAt: new Date().toISOString(),
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unexpected laughter detection failure.";
+        console.error(`Laughter detection for job ${id} failed: ${message}`);
+        return this.endStep(id, "laughter", "failed", {
+          laughter: { ...started.laughter, status: "failed", events: started.laughter.events, error: message },
+        });
+      }
     });
+  }
+
+  private async waveformStep(id: string) {
+    if (!this.hasStep(id, "waveform", "pending", "running")) return;
+    const job = this.store.get(id);
+    if (!job || !recordingAvailable(job) || !job.durationMs) {
+      await this.endStep(id, "waveform", "skipped");
+      return;
+    }
+    await this.withCpu(id, "waveform", async () => {
+      await this.startStep(id, "waveform");
+      try {
+        await this.buildWaveform(id);
+        await this.endStep(id, "waveform", "done");
+      } catch (error) {
+        console.error(`Waveform for session ${id} failed: ${error instanceof Error ? error.message : error}`);
+        await this.endStep(id, "waveform", "failed", {}, "Will be built when you open the clip editor");
+      }
+    });
+  }
+
+  // Local work that doesn't depend on the transcript runs while Azure transcribes: laughter, then the waveform.
+  private async sideWork(id: string) {
     try {
-      const result = await this.laughter.detect(this.store.audioPath(job.id), durationMs);
-      return this.endStep(job.id, "laughter", "done", {
-        laughter: {
-          status: "completed",
-          events: result.events,
-          model: result.model,
-          modelVersion: result.modelVersion,
-          profileVersion: result.profileVersion,
-          completedAt: new Date().toISOString(),
-        },
-      });
+      if (this.hasStep(id, "laughter", "pending", "running")) await this.detectLaughter(this.store.get(id)!, false);
+      await this.waveformStep(id);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unexpected laughter detection failure.";
-      console.error(`Laughter detection for job ${job.id} failed: ${message}`);
-      return this.endStep(job.id, "laughter", "failed", {
-        laughter: { ...job.laughter, status: "failed", events: job.laughter.events, error: message },
-      });
+      console.error(`Background analysis for session ${id} failed:`, error instanceof Error ? error.message : error);
     }
   }
 
@@ -219,6 +282,7 @@ export class JobRunner {
   private async process(id: string, recapOnly = false) {
     let job = this.store.get(id)!;
     let outcome: "completed" | "failed" = "completed";
+    let side: Promise<void> | undefined;
     try {
       const transcribed = job.segments.length > 0;
       const submitted = transcribed || !!job.speechJobUrl;
@@ -226,7 +290,7 @@ export class JobRunner {
         job.laughter.status === "completed" || job.laughter.status === "skipped";
       job = recapOnly ? await this.plan(id, "recap", [["recap", false]]) : await this.plan(id, "process", [
         ["prepare", submitted], ["upload", submitted], ["submit", submitted],
-        ["laughter", transcribed || laughterSettled], ["transcribe", transcribed],
+        ["laughter", transcribed || laughterSettled], ["waveform", transcribed], ["transcribe", transcribed],
         ["recap", readiness().recapMissing.length > 0], ["cleanup", false],
       ]);
       if (!this.canProcess(id)) throw new Error("The session owner's account is no longer active, so processing stopped.");
@@ -237,17 +301,19 @@ export class JobRunner {
       if (!job.segments.length) {
         if (readiness().transcriptionMissing.length) throw new Error("Azure Speech/Storage configuration is incomplete.");
         if (!job.speechJobUrl) {
-          job = await this.startStep(id, "prepare", { status: "normalizing", stage: "Checking recording and mixing to mono for diarization", error: undefined });
-          const durationMs = await inspectRecording(config.ffprobe, this.store.audioPath(id), job.originalName);
-          job = await this.update(id, { durationMs, audioRetained: true });
-          await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id), MAX_TRANSCRIPTION_MS + 60_000);
-          // Container metadata can understate length; bill and bound the audio Speech will actually receive.
-          const decodedMs = await inspectDecodedDuration(config.ffprobe, this.store.monoPath(id));
-          if (decodedMs > MAX_TRANSCRIPTION_MS + 30_000) {
-            throw new Error("This recording exceeds Azure batch diarization's 4-hour limit. Split it manually; speaker labels will not carry across files.");
-          }
-          if (decodedMs > durationMs + DURATION_TOLERANCE_MS) this.chargeExtraAudio(id, decodedMs - durationMs);
-          job = await this.endStep(id, "prepare", "done", { durationMs: Math.max(durationMs, decodedMs) });
+          job = await this.withCpu(id, "prepare", async () => {
+            let current = await this.startStep(id, "prepare", { status: "normalizing", stage: "Checking recording and mixing to mono for diarization", error: undefined });
+            const durationMs = await inspectRecording(config.ffprobe, this.store.audioPath(id), current.originalName);
+            current = await this.update(id, { durationMs, audioRetained: true });
+            await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id), MAX_TRANSCRIPTION_MS + 60_000);
+            // Container metadata can understate length; bill and bound the audio Speech will actually receive.
+            const decodedMs = await inspectDecodedDuration(config.ffprobe, this.store.monoPath(id));
+            if (decodedMs > MAX_TRANSCRIPTION_MS + 30_000) {
+              throw new Error("This recording exceeds Azure batch diarization's 4-hour limit. Split it manually; speaker labels will not carry across files.");
+            }
+            if (decodedMs > durationMs + DURATION_TOLERANCE_MS) this.chargeExtraAudio(id, decodedMs - durationMs);
+            return this.endStep(id, "prepare", "done", { durationMs: Math.max(durationMs, decodedMs) });
+          });
           job = await this.startStep(id, "upload", { status: "uploading", stage: "Uploading to private Azure Blob Storage", blobName: `${id}/mono.mp3` });
           const audioUrl = await this.speech.upload(this.store.monoPath(id), job.blobName!);
           job = await this.endStep(id, "upload", "done");
@@ -259,7 +325,7 @@ export class JobRunner {
             job = await this.endStep(id, "submit", "done", { speechJobUrl, status: "transcribing", stage: "Azure Speech job submitted" });
           } finally { this.criticalSections--; }
         }
-        job = await this.detectLaughter(job, true);
+        side = this.sideWork(id);
         job = await this.startStep(id, "transcribe", { status: "transcribing" });
         const result = await this.speech.waitForTranscript(job.speechJobUrl!, async status => {
           await this.stepUpdate(id, "transcribe", { detail: status === "NotStarted" ? "Waiting in Azure's queue" : "Azure is transcribing" },
@@ -267,44 +333,48 @@ export class JobRunner {
         });
         job = await this.endStep(id, "transcribe", "done", {
           status: "transcript_ready", stage: "Transcript saved",
-          segments: result.segments, warnings: [...job.warnings, ...result.warnings],
+          segments: result.segments, warnings: [...this.store.get(id)!.warnings, ...result.warnings],
         });
       }
       if (readiness().recapMissing.length) throw new Error("Transcript is ready. Configure Azure OpenAI to generate its recap.");
-      job = await this.startStep(id, "recap", { status: "summarizing", stage: "Preparing evidence-grounded recap", error: undefined });
-      const recap = await this.recap(job, async stage => {
-        const fraction = recapFraction(stage);
-        await this.stepUpdate(id, "recap", { detail: stage, ...(fraction === undefined ? {} : { fraction }) }, { stage });
+      if (this.recapSlots.busy) await this.stepUpdate(id, "recap", { detail: "Waiting for another recap to finish" });
+      job = await this.recapSlots.run(async () => {
+        const current = await this.startStep(id, "recap", { status: "summarizing", stage: "Preparing evidence-grounded recap", error: undefined });
+        const recap = await this.recap(current, async stage => {
+          const fraction = recapFraction(stage);
+          await this.stepUpdate(id, "recap", { detail: stage, ...(fraction === undefined ? {} : { fraction }) }, { stage });
+        });
+        return this.endStep(id, "recap", "done", { recap, recapStale: false, status: "completed", stage: "Transcript and recap ready", queuedOperation: undefined });
       });
-      job = await this.endStep(id, "recap", "done", { recap, recapStale: false, status: "completed", stage: "Transcript and recap ready", queuedOperation: undefined });
     } catch (error) {
       outcome = "failed";
       const message = error instanceof Error ? error.message : "Unexpected processing failure.";
       console.error(`Job ${id} failed: ${message}`);
-      job = await this.update(id, {
-        status: this.store.get(id)!.segments.length ? "transcript_ready" : "failed",
-        stage: this.store.get(id)!.segments.length ? "Transcript saved; recap requires attention" : "Processing failed",
+      job = await this.store.mutate(id, current => ({
+        status: current.segments.length ? "transcript_ready" : "failed",
+        stage: current.segments.length ? "Transcript saved; recap requires attention" : "Processing failed",
         error: message, queuedOperation: undefined,
-      });
+      }));
     } finally {
+      // Laughter and waveform results are independent of the transcript; let them finish before cleaning up.
+      await side;
       // A step that was still running when processing failed is the one that failed.
       const running = this.store.get(id)?.progress?.steps.find(step => step.status === "running" && step.key !== "cleanup");
       if (running) await this.endStep(id, running.key, outcome === "failed" ? "failed" : "done");
       if (this.hasStep(id, "cleanup", "pending", "running")) await this.startStep(id, "cleanup");
-      const warnings = await this.speech.cleanup(job);
+      const warnings = await this.speech.cleanup(this.store.get(id) ?? job);
       for (const file of [this.store.monoPath(id)]) {
         try { await rm(file, { force: true }); }
         catch { warnings.push("Could not delete normalized local audio. Remove mono.mp3 manually from this job's data directory."); }
       }
       if (warnings.length) {
         console.warn(`Job ${id} cleanup warnings: ${warnings.join(" ")}`);
-        await this.update(id, { warnings: [...this.store.get(id)!.warnings, ...warnings] });
+        await this.store.mutate(id, current => ({ warnings: [...current.warnings, ...warnings] }));
       }
       // Keep failed cleanup handles for deletion retries, but not successful ones.
       if (!warnings.length) await this.update(id, { speechJobUrl: undefined, blobName: undefined });
       if (this.hasStep(id, "cleanup", "running")) await this.endStep(id, "cleanup", "done");
       await this.finishRun(id, outcome);
-      try { this.afterRun(id); } catch { /* best effort */ }
     }
   }
 }

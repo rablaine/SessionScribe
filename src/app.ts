@@ -360,9 +360,9 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     }
     res.status(status).type("application/json").json({ error: message });
   });
-  app.locals.warmWaveform = (id: string) => {
+  app.locals.buildWaveform = async (id: string) => {
     const job = store.get(id);
-    if (job && recordingAvailable(job) && job.durationMs) waveforms.warm(job.id, store.audioPath(job.id), job.durationMs);
+    if (job && recordingAvailable(job) && job.durationMs) await waveforms.build(job.id, store.audioPath(job.id), job.durationMs);
   };
   app.locals.isRecordingBusy = (id: string) =>
     runner.busyIds.has(id) || exportingJobs.has(id) || waveforms.isGenerating(id);

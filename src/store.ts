@@ -69,23 +69,35 @@ export class JobStore {
 
   async save(job: Job) {
     const value = jobSchema.parse({ ...job, updatedAt: new Date().toISOString() });
-    return this.serialize(job.id, async () => {
-      const directory = this.directory(job.id);
-      const temporary = path.join(directory, `job.json.${randomUUID()}.tmp`);
-      await mkdir(directory, { recursive: true });
+    return this.serialize(job.id, () => this.write(value));
+  }
+
+  private async write(value: Job) {
+    const directory = this.directory(value.id);
+    const temporary = path.join(directory, `job.json.${randomUUID()}.tmp`);
+    await mkdir(directory, { recursive: true });
+    try {
+      await writeFile(temporary, JSON.stringify(value, null, 2), "utf8");
+      await renameJobFile(temporary, path.join(directory, "job.json"), this.persistence);
+    } catch (error) {
       try {
-        await writeFile(temporary, JSON.stringify(value, null, 2), "utf8");
-        await renameJobFile(temporary, path.join(directory, "job.json"), this.persistence);
-      } catch (error) {
-        try {
-          await rm(temporary, { force: true });
-        } catch (cleanupError) {
-          console.error(`Could not remove failed job persistence temporary file ${temporary}:`, cleanupError);
-        }
-        throw error;
+        await rm(temporary, { force: true });
+      } catch (cleanupError) {
+        console.error(`Could not remove failed job persistence temporary file ${temporary}:`, cleanupError);
       }
-      this.jobs.set(job.id, value);
-      return value;
+      throw error;
+    }
+    this.jobs.set(value.id, value);
+    return value;
+  }
+
+  // Read-modify-write against the latest saved state, serialized with other writes to the same job, so
+  // concurrent workers on one session (e.g. transcription and laughter detection) never drop each other's changes.
+  async mutate(id: string, change: (job: Job) => Partial<Job>): Promise<Job> {
+    return this.serialize(id, async () => {
+      const current = this.jobs.get(id);
+      if (!current) throw new Error("Processing job disappeared.");
+      return this.write(jobSchema.parse({ ...current, ...change(current), updatedAt: new Date().toISOString() }));
     });
   }
 

@@ -78,7 +78,7 @@ export const recapSchema = z.union([narrativeRecapSchema, legacyRecapSchema]).tr
 export type Recap = z.infer<typeof recapSchema>;
 export const recapKeys = ["paragraphs", "uncertainties"] as const;
 
-export const progressStepKeys = ["prepare", "upload", "submit", "laughter", "transcribe", "recap", "cleanup"] as const;
+export const progressStepKeys = ["prepare", "upload", "submit", "laughter", "waveform", "transcribe", "recap", "cleanup"] as const;
 export type ProgressStepKey = typeof progressStepKeys[number];
 export const progressStepSchema = z.object({
   key: z.enum(progressStepKeys),

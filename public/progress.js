@@ -9,6 +9,13 @@
 
   const ICONS = { done: "\u2713", running: "\u25cf", pending: "\u25cb", failed: "\u2715" };
   const RUN_TITLES = { process: "Processing this session", recap: "Generating the recap", laughter: "Detecting laughter" };
+  // What each step makes available, so people know which tools to wait for instead of assuming something is broken.
+  const UNLOCKS = {
+    laughter: "laughter index",
+    waveform: "clip editor waveform",
+    transcribe: "transcript, search, speaker names and exports",
+    recap: "story recap",
+  };
 
   function duration(ms) {
     const seconds = Math.max(0, Math.round(ms / 1000));
@@ -27,21 +34,31 @@
     return typeof step.fraction === "number" ? Math.max(step.fraction, Math.min(timed, step.fraction + 0.1)) : timed;
   }
 
+  // Laughter and waveform run alongside transcription and recap, so time left follows the longer branch.
+  const PARALLEL_SIDE = new Set(["laughter", "waveform"]);
+  const PARALLEL_MAIN = new Set(["transcribe", "recap"]);
+
   function summarize(progress, now) {
     const steps = progress.steps.filter(step => step.status !== "skipped");
-    let total = 0, completed = 0, remaining = 0, overdue = false;
+    let total = 0, completed = 0, overdue = false;
+    const remaining = { serial: 0, side: 0, main: 0 };
     for (const step of steps) {
       const weight = Math.max(step.estimateMs || 0, 2000);
       total += weight;
       completed += weight * stepFraction(step, now);
-      if (step.status === "pending") remaining += weight;
+      let left = 0;
+      if (step.status === "pending") left = weight;
       if (step.status === "running") {
         const elapsed = now - Date.parse(step.startedAt || "");
-        remaining += Math.max(weight - elapsed, 0);
+        left = Math.max(weight - elapsed, 0);
         if (elapsed > weight * 1.2) overdue = true;
       }
+      remaining[PARALLEL_SIDE.has(step.key) ? "side" : PARALLEL_MAIN.has(step.key) ? "main" : "serial"] += left;
     }
-    return { percent: total ? Math.min(99, Math.round(completed / total * 100)) : 0, remaining, overdue, steps };
+    return {
+      percent: total ? Math.min(99, Math.round(completed / total * 100)) : 0,
+      remaining: remaining.serial + Math.max(remaining.side, remaining.main), overdue, steps,
+    };
   }
 
   function etaText({ remaining, overdue }) {
@@ -64,6 +81,13 @@
       const label = document.createElement("span");
       label.className = "progress-step-label";
       label.textContent = step.label;
+      if (UNLOCKS[step.key]) {
+        const unlocks = document.createElement("span");
+        unlocks.className = "progress-step-unlocks";
+        unlocks.textContent = step.status === "done" ? `Ready: ${UNLOCKS[step.key]}` :
+          step.status === "failed" ? `Not available: ${UNLOCKS[step.key]}` : `Unlocks: ${UNLOCKS[step.key]}`;
+        label.append(unlocks);
+      }
       const meta = document.createElement("span");
       meta.className = "progress-step-meta";
       if (step.status === "done" && step.startedAt && step.endedAt) {
@@ -71,7 +95,9 @@
       } else if (step.status === "running" && step.startedAt) {
         meta.textContent = `${step.detail ? `${step.detail} \u00b7 ` : ""}${duration(now - Date.parse(step.startedAt))}`;
       } else if (step.status === "failed") {
-        meta.textContent = "Failed";
+        meta.textContent = step.detail || "Failed";
+      } else if (step.status === "pending" && step.detail) {
+        meta.textContent = step.detail;
       }
       const state = document.createElement("span");
       state.className = "visually-hidden";
@@ -91,6 +117,12 @@
     panel.classList.toggle("finished", !running);
     byId("run-progress-track").hidden = !running;
     renderSteps(progress, now);
+    const waiting = progress.steps.filter(step => (step.status === "pending" || step.status === "running") && UNLOCKS[step.key])
+      .map(step => UNLOCKS[step.key]);
+    byId("run-progress-pending").hidden = !running || !waiting.length;
+    byId("run-progress-pending").textContent = waiting.length
+      ? `Not ready yet: ${waiting.join("; ")}. Each appears as its step finishes. You can play the recording now.`
+      : "";
     if (running) {
       const summary = summarize(progress, now);
       byId("run-progress-title").textContent = RUN_TITLES[progress.kind] || "Processing";

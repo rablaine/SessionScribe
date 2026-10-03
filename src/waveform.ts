@@ -117,6 +117,11 @@ export class Waveforms {
     return waveformWindow(await this.ensure(id, input, durationMs), startMs, endMs, bins);
   }
 
+  // Builds (or reuses) the cached waveform; used as a processing step so the clip editor opens instantly.
+  async build(id: string, input: string, durationMs: number): Promise<void> {
+    await this.ensure(id, input, durationMs);
+  }
+
   // Pre-builds the cached waveform after processing so the clip editor opens instantly. Errors are logged only.
   warm(id: string, input: string, durationMs: number) {
     try { void this.ensure(id, input, durationMs).catch(() => {}); }

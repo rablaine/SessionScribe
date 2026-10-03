@@ -79,7 +79,7 @@ const retention = new RetentionSweeper(store, {
   isBusy: id => (app.locals.isRecordingBusy as (id: string) => boolean)(id),
 });
 const backups = new DailyBackups(accounts, path.join(config.dataDir, "backups"));
-runner.afterRun = id => (app.locals.warmWaveform as (id: string) => void)(id);
+runner.buildWaveform = id => (app.locals.buildWaveform as (id: string) => Promise<void>)(id);
 handler = app;
 
 for (const job of store.list()) {
