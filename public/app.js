@@ -46,10 +46,12 @@ function updatePlayer(job) {
   if (job?.audioRetained) {
     player.src = `/api/jobs/${job.id}/audio`;
     player.hidden = false;
+    $("skip-back").hidden = $("skip-forward").hidden = false;
     $("audio-playback-status").textContent = "Timestamps seek the recording without starting playback.";
   } else {
     player.removeAttribute("src");
     player.hidden = true;
+    $("skip-back").hidden = $("skip-forward").hidden = true;
     $("audio-playback-status").textContent = job?.demo ?
       "Fictional demo: no original recording exists." :
       job?.recordingState === "expired" ?
@@ -59,6 +61,27 @@ function updatePlayer(job) {
   player.load();
   $("audio-player-title").textContent = job ? `Original recording · ${job.title}` : "";
 }
+
+// Skip within the original recording; long sessions are hard to scrub precisely with the native slider.
+function skipPlayback(deltaSeconds) {
+  const player = $("recording-player");
+  if (player.hidden || !player.src) return;
+  const end = Number.isFinite(player.duration) ? player.duration : Infinity;
+  player.currentTime = Math.min(end, Math.max(0, player.currentTime + deltaSeconds));
+  $("audio-playback-status").textContent = `Positioned at ${time(player.currentTime * 1000)}.`;
+}
+$("skip-back").addEventListener("click", () => skipPlayback(-10));
+$("skip-forward").addEventListener("click", () => skipPlayback(10));
+document.addEventListener("keydown", event => {
+  if (!event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  const target = event.target;
+  // Leave Shift+arrow text selection alone in form fields and the clip editor's own controls.
+  if (target instanceof HTMLElement && (target.closest("input, textarea, select, [contenteditable], dialog[open]"))) return;
+  if ($("audio-player-bar").hidden || $("recording-player").hidden) return;
+  event.preventDefault();
+  skipPlayback(event.key === "ArrowLeft" ? -10 : 10);
+});
 
 function applySeek(seconds) {
   const player = $("recording-player");

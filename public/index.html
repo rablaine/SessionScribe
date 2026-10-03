@@ -155,7 +155,11 @@
   </div>
   <section id="audio-player-bar" class="audio-player-bar" aria-label="Original recording playback" hidden>
     <div class="audio-details"><strong id="audio-player-title">Original recording</strong><p id="audio-playback-status" class="hint" role="status"></p></div>
-    <audio id="recording-player" controls preload="metadata" aria-label="Play original session recording"></audio>
+    <div id="audio-controls" class="audio-controls">
+      <button id="skip-back" class="quiet skip-button" type="button" aria-label="Back 10 seconds" title="Back 10 seconds (Shift+←)">&#x21BA; 10</button>
+      <audio id="recording-player" controls preload="metadata" aria-label="Play original session recording"></audio>
+      <button id="skip-forward" class="quiet skip-button" type="button" aria-label="Forward 10 seconds" title="Forward 10 seconds (Shift+→)">10 &#x21BB;</button>
+    </div>
   </section>
   <dialog id="import-dialog" class="import-dialog" aria-labelledby="import-title" aria-describedby="import-description">
     <header class="dialog-heading"><div><p class="eyebrow">New session</p><h2 id="import-title">Import a recording</h2></div><button class="quiet" type="button" data-close-import aria-label="Close import dialog">Close</button></header>

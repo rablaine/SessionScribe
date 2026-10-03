@@ -84,9 +84,14 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       endMs: z.coerce.number().int().positive(),
       bins: z.coerce.number().int().min(32).max(2048).default(1024),
     }).strict().refine(value => value.endMs > value.startMs && value.endMs <= job.durationMs!).parse(req.query);
-    const data = await waveforms.get(job.id, store.audioPath(job.id), job.durationMs, window.startMs, window.endMs, window.bins);
+    const data = await waveforms.window(job.id, store.audioPath(job.id), job.durationMs, window.startMs, window.endMs, window.bins);
     if (!accounts.isActiveUser(accounts.userId(req)) || !accounts.ownsJob(accounts.userId(req), job.id)) {
       res.status(403).json({ error: "Your account no longer has access." }); return;
+    }
+    if (!data) {
+      // Still decoding a long recording in the background; the browser polls instead of holding the request open.
+      res.status(202).set("Retry-After", "3").json({ status: "generating" });
+      return;
     }
     res.json(data);
   });
@@ -355,6 +360,10 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     }
     res.status(status).type("application/json").json({ error: message });
   });
+  app.locals.warmWaveform = (id: string) => {
+    const job = store.get(id);
+    if (job && recordingAvailable(job) && job.durationMs) waveforms.warm(job.id, store.audioPath(job.id), job.durationMs);
+  };
   app.locals.isRecordingBusy = (id: string) =>
     runner.busyIds.has(id) || exportingJobs.has(id) || waveforms.isGenerating(id);
   app.locals.uploads = uploads;

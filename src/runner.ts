@@ -44,6 +44,8 @@ export class JobRunner {
   canProcess: (id: string) => boolean = () => true;
   // Set by the server: charges decoded audio beyond the declared duration to the owner's quota (throws when over).
   chargeExtraAudio: (id: string, extraMs: number) => void = () => {};
+  // Set by the server: runs after a processing run ends (used to pre-build the clip editor's waveform).
+  afterRun: (id: string) => void = () => {};
   private reserved = new Set<string>();
   // Learned stage durations; the server points this at DATA_DIR so estimates improve over time.
   timings = new StageTimings();
@@ -302,6 +304,7 @@ export class JobRunner {
       if (!warnings.length) await this.update(id, { speechJobUrl: undefined, blobName: undefined });
       if (this.hasStep(id, "cleanup", "running")) await this.endStep(id, "cleanup", "done");
       await this.finishRun(id, outcome);
+      try { this.afterRun(id); } catch { /* best effort */ }
     }
   }
 }

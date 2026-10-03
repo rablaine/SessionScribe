@@ -82,18 +82,45 @@ export class Waveforms {
   private pending = new Map<string, Promise<Buffer>>();
   constructor(private executable: string) {}
   isGenerating(id: string) { return this.pending.has(id); }
-  async get(id: string, input: string, durationMs: number, startMs: number, endMs: number, bins: number) {
+
+  // Starts (or joins) generation in the background. Decoding a multi-hour recording can outlast proxy
+  // request limits, so callers never have to keep an HTTP request open for the whole decode.
+  private ensure(id: string, input: string, durationMs: number): Promise<Buffer> {
     if (!Number.isFinite(durationMs) || durationMs <= 0 || durationMs > maximumDurationMs) {
       throw new Error("A valid recording duration is required for a waveform.");
     }
     let pending = this.pending.get(id);
     if (!pending) {
       if (this.pending.size >= 2) throw Object.assign(new Error("Waveform generation is busy. Try again shortly."), { status: 429 });
-      pending = this.load(input, durationMs);
-      this.pending.set(id, pending);
+      const created = this.load(input, durationMs);
+      pending = created;
+      this.pending.set(id, created);
+      created.then(() => {}, error => {
+        console.error(`Waveform generation for session ${id} failed:`, error instanceof Error ? error.message : error);
+      }).finally(() => { if (this.pending.get(id) === created) this.pending.delete(id); });
     }
-    try { return waveformWindow(await pending, startMs, endMs, bins); }
-    finally { if (this.pending.get(id) === pending) this.pending.delete(id); }
+    return pending;
+  }
+
+  // Returns the requested window, or undefined if generation is still running after waitMs.
+  async window(id: string, input: string, durationMs: number, startMs: number, endMs: number, bins: number, waitMs = 15_000) {
+    const pending = this.ensure(id, input, durationMs);
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), waitMs); });
+    try {
+      const peaks = await Promise.race([pending, timeout]);
+      return peaks ? waveformWindow(peaks, startMs, endMs, bins) : undefined;
+    } finally { clearTimeout(timer); }
+  }
+
+  async get(id: string, input: string, durationMs: number, startMs: number, endMs: number, bins: number) {
+    return waveformWindow(await this.ensure(id, input, durationMs), startMs, endMs, bins);
+  }
+
+  // Pre-builds the cached waveform after processing so the clip editor opens instantly. Errors are logged only.
+  warm(id: string, input: string, durationMs: number) {
+    try { void this.ensure(id, input, durationMs).catch(() => {}); }
+    catch (error) { console.warn(`Waveform pre-generation for session ${id} skipped:`, error instanceof Error ? error.message : error); }
   }
   private async load(input: string, durationMs: number) {
     const source = await stat(input);

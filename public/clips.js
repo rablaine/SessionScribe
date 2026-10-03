@@ -194,13 +194,21 @@
     const version = generation;
     const sequence = waveformSequence;
     const id = job.id;
-    waveformTimer = setTimeout(async () => {
+    const started = Date.now();
+    const attempt = async () => {
       const controller = new AbortController();
       waveformController = controller;
       try {
         const data = await auth.request(`/api/jobs/${id}/waveform?startMs=${startMs}&endMs=${endMs}&bins=2048`,
           { signal: controller.signal });
         if (version !== generation || sequence !== waveformSequence || !dialog.open) return;
+        if (data?.status === "generating") {
+          // The server is still decoding a long recording in the background; check back shortly.
+          const seconds = Math.round((Date.now() - started) / 1000);
+          $("clip-waveform-status").textContent = `Analyzing the recording for the waveform (${seconds} s)\u2026 Long sessions can take a minute or two the first time. Playback and clipping work meanwhile.`;
+          waveformTimer = setTimeout(attempt, 3000);
+          return;
+        }
         waveform = data;
         waveformCache.set(key, data);
         if (waveformCache.size > 8) waveformCache.delete(waveformCache.keys().next().value);
@@ -212,7 +220,8 @@
         $("clip-waveform-status").textContent = `Waveform unavailable: ${cause.message} Clip playback and export still work.`;
         $("clip-waveform-retry").hidden = false;
       }
-    }, 160);
+    };
+    waveformTimer = setTimeout(attempt, 160);
   }
   $("clip-waveform-retry").addEventListener("click", () => { waveformKey = ""; requestWaveform(); });
   new ResizeObserver(() => { waveformDrawKey = ""; drawWaveform(); renderRuler(); }).observe(track);

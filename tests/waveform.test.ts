@@ -65,3 +65,27 @@ test("real MP3/Opus waveforms expose silence without cancelling opposite stereo 
     }
   } finally { await f.close(); }
 });
+
+test("long waveform decodes run in the background: callers get 'not ready' instead of a held request", async () => {
+  const { mkdtemp } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const { Waveforms } = await import("../src/waveform.js");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "scribe-waveform-bg-"));
+  try {
+    const input = path.join(directory, "original.mp3");
+    await runTool(config.ffmpeg, ["-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=330:duration=20",
+      "-codec:a", "libmp3lame", input], 60000);
+    const waveforms = new Waveforms(config.ffmpeg);
+    assert.equal(await waveforms.window("bg", input, 20_000, 0, 20_000, 64, 0), undefined, "no waiting when asked not to");
+    assert.equal(waveforms.isGenerating("bg"), true, "generation continues after the request returns");
+    let ready;
+    for (let attempt = 0; attempt < 100 && !ready; attempt++) ready = await waveforms.window("bg", input, 20_000, 0, 20_000, 64, 200);
+    assert.equal(ready!.peaks.length, 64);
+    assert.ok(ready!.maxAmplitude > 0.02, "the decoded tone is audible in the envelope");
+    assert.equal(waveforms.isGenerating("bg"), false);
+    waveforms.warm("bg", input, 20_000);
+    await stat(path.join(directory, "waveform-v1.bin"));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
