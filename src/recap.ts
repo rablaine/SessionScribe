@@ -24,6 +24,7 @@ const quoteJsonSchema = {
     rating: { type: "integer", minimum: 1, maximum: 5 },
   },
 } as const;
+const QUOTES_PER_PART = 6;
 // Only the first read of the raw transcript can pick verbatim quotes; later passes see notes, not lines.
 const picksQuotes = (phase: RecapPhase) => !phase.final && phase.level === 0;
 function recapJsonSchema(phase: RecapPhase) {
@@ -36,7 +37,7 @@ function recapJsonSchema(phase: RecapPhase) {
       title: { type: "string", minLength: 1, maxLength: 200 },
       paragraphs: { type: "array", minItems: phase.final ? 1 : 0, maxItems: phase.final ? 15 : 8, items: itemJsonSchema },
       uncertainties: { type: "array", maxItems: 3, items: itemJsonSchema },
-      ...(quotes ? { quotes: { type: "array", maxItems: 3, items: quoteJsonSchema } } : {}),
+      ...(quotes ? { quotes: { type: "array", maxItems: QUOTES_PER_PART, items: quoteJsonSchema } } : {}),
     },
   };
 }
@@ -115,7 +116,7 @@ Capture who did what, why when explicitly stated, the result, discoveries, impor
 Preserve enough concrete detail for a later writer; do not polish the beats into vague atmospheric prose.
 If this portion contains only unrelated table chatter or a previous-session recap, return empty paragraphs and uncertainties.
 Give this portion a short descriptive scene title about its actual events, NOT the session date or "Session Recap".
-Separately, pick up to 3 quotes from this portion for an "out of context" list: lines that are funny, absurd, or baffling
+Separately, pick up to 6 quotes from this portion for an "out of context" list: lines that are funny, absurd, or baffling
 when read completely on their own, the kind a group pins to a quotes board. In-game or out-of-game lines both count.
 Copy each quote word for word from the text of a single source line (you may keep only the funny part of a long line,
 but never change, add, or reorder words), give that line's speaker label exactly as shown, and rate 1-5 how funny it is
@@ -209,7 +210,7 @@ export async function callAzure(
         uncertainties: z.array(modelItemSchema).max(3),
         ...(picksQuotes(phase) ? { quotes: z.array(z.object({
           text: z.string().trim().min(1).max(300), speaker: z.string().max(100), rating: z.number().int().min(1).max(5),
-        }).strict()).max(3) } : {}),
+        }).strict()).max(QUOTES_PER_PART) } : {}),
       }).strict().parse(JSON.parse(choice.message.content)) as {
         title: string; paragraphs: Array<{ text: string }>; uncertainties: Array<{ text: string }>; quotes?: QuoteCandidate[];
       };
@@ -229,7 +230,8 @@ export async function callAzure(
   throw new Error(`Recap response failed validation after a corrective retry: ${validationFailure}`);
 }
 
-const MAX_QUOTES = 8;
+// Ranked pool kept on the recap; the reader chooses how many to show.
+const MAX_QUOTES = 30;
 const MIN_QUOTE_RATING = 3;
 const quoteWords = (value: string) =>
   value.toLocaleLowerCase().replace(/[\u2019']/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
@@ -256,19 +258,26 @@ export function matchQuote(candidate: QuoteCandidate, chunk: Segment[], job: Job
   return { text, speaker: first.speaker, segmentId: first.id, startMs: first.startMs, endMs: Math.max(first.endMs, last.endMs) };
 }
 
-// Best-rated quotes, at most two from any one part of the session, shown in the order they were said.
+// Ranks quotes best first, spreading them across the session: each round allows one more quote from any one part, so
+// the top few aren't all from a single scene, yet a strong part can still contribute several. Returned in spoken order.
 export function selectQuotes(candidates: ScoredQuote[], max = MAX_QUOTES): RecapQuote[] {
-  const perChunk = new Map<number, number>();
+  const byScore = [...candidates].sort((a, b) => b.score - a.score || a.startMs - b.startMs);
   const seen = new Set<string>();
-  const picked: ScoredQuote[] = [];
-  for (const candidate of [...candidates].sort((a, b) => b.score - a.score || a.startMs - b.startMs)) {
-    if (picked.length >= max) break;
-    if (seen.has(candidate.segmentId) || (perChunk.get(candidate.chunk) ?? 0) >= 2) continue;
-    seen.add(candidate.segmentId);
-    perChunk.set(candidate.chunk, (perChunk.get(candidate.chunk) ?? 0) + 1);
-    picked.push(candidate);
+  const unique = byScore.filter(candidate => !seen.has(candidate.segmentId) && !!seen.add(candidate.segmentId));
+  const perChunk = new Map<number, number>();
+  const ranked: ScoredQuote[] = [];
+  const taken = new Set<ScoredQuote>();
+  for (let cap = 2; ranked.length < Math.min(max, unique.length); cap++) {
+    for (const candidate of unique) {
+      if (ranked.length >= max) break;
+      if (taken.has(candidate) || (perChunk.get(candidate.chunk) ?? 0) >= cap) continue;
+      taken.add(candidate);
+      perChunk.set(candidate.chunk, (perChunk.get(candidate.chunk) ?? 0) + 1);
+      ranked.push(candidate);
+    }
   }
-  return picked.sort((a, b) => a.startMs - b.startMs).map(({ score: _score, chunk: _chunk, ...quote }) => quote);
+  return ranked.map(({ score: _score, chunk: _chunk, ...quote }, index) => ({ ...quote, rank: index + 1 }))
+    .sort((a, b) => a.startMs - b.startMs);
 }
 
 function noteLines(recaps: RecapDraft[]): string[] {

@@ -327,7 +327,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     res.type(format === "json" ? "application/json" : format === "md" ? "text/markdown" : "text/plain");
     res.send(format === "json" ? JSON.stringify(publicJob(job), null, 2) :
       format === "srt" ? transcriptSrt(job) : format === "md" ? transcriptMarkdown(job) :
-      format === "recap" ? recapMarkdown(job) : transcriptText(job));
+      format === "recap" ? recapMarkdown(job, z.coerce.number().int().min(0).max(40).catch(40).parse(req.query.quotes ?? 40)) : transcriptText(job));
   });
   // Removes a session and everything it owns. Throws if Azure cleanup fails, so nothing is silently left behind.
   const deleteNow = async (id: string) => {

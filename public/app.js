@@ -318,6 +318,7 @@ function renderJob(job) {
     link.hidden = format === "recap" ? !job.recap : !job.segments.length && job.status !== "transcript_ready";
     link.href = `/api/jobs/${job.id}/export/${format}`;
   }
+  updateRecapExport(job);
   $("regenerate").hidden = job.demo;
   $("regenerate").disabled = processing || savingTranscript || !job.segments.length;
   $("regenerate").textContent = job.recap ? "Regenerate recap" : "Generate recap";
@@ -579,6 +580,27 @@ function clipButton(segment) {
   return button;
 }
 
+// How many out-of-context quotes to show; remembered per browser. The recap keeps a ranked pool of up to 30.
+const QUOTE_KEY = "scribe-quote-count";
+const QUOTE_COUNTS = ["5", "10", "20", "all"];
+function quoteSetting() {
+  try { return QUOTE_COUNTS.includes(localStorage.getItem(QUOTE_KEY)) ? localStorage.getItem(QUOTE_KEY) : "10"; } catch { return "10"; }
+}
+function quoteLimit() {
+  const value = quoteSetting();
+  return value === "all" ? Infinity : Number(value);
+}
+// Best `limit` by rank, shown in the order they were said (matches the server's topQuotes).
+function topQuotes(quotes, limit) {
+  return quotes.map((quote, index) => ({ quote, rank: quote.rank ?? index + 1 }))
+    .filter(({ rank }) => rank <= limit).map(({ quote }) => quote).sort((a, b) => a.startMs - b.startMs);
+}
+function updateRecapExport(job) {
+  if (!job) return;
+  const limit = quoteLimit();
+  $("export-recap").href = `/api/jobs/${job.id}/export/recap${Number.isFinite(limit) ? `?quotes=${limit}` : ""}`;
+}
+
 function renderRecap(job) {
   const root = $("recap-content");
   root.replaceChildren();
@@ -638,9 +660,44 @@ function renderRecap(job) {
     root.append(list);
   }
   if (job.recap.quotes?.length) {
-    root.append(element("h3", "", "Out of context"));
+    const shown = topQuotes(job.recap.quotes, quoteLimit());
+    const header = element("div", "recap-quotes-header");
+    header.append(element("h3", "", "Out of context"));
+    const controls = element("div", "recap-quotes-controls");
+    const countLabel = element("label", "recap-quotes-count", "Show ");
+    const count = element("select");
+    for (const value of QUOTE_COUNTS) {
+      if (value !== "all" && Number(value) >= job.recap.quotes.length) continue;
+      const option = element("option", "", value === "all" ? `All ${job.recap.quotes.length}` : value);
+      option.value = value;
+      count.append(option);
+    }
+    count.value = [...count.options].some(option => option.value === quoteSetting()) ? quoteSetting() : "all";
+    count.setAttribute("aria-label", "Number of quotes to show");
+    count.addEventListener("change", () => {
+      try { localStorage.setItem(QUOTE_KEY, count.value); } catch {}
+      renderRecap(currentJob);
+      updateRecapExport(currentJob);
+    });
+    countLabel.append(count);
+    const copy = element("button", "quiet compact", "Copy list");
+    copy.type = "button";
+    copy.title = "Copy the quotes, one per line, without names or times";
+    copy.addEventListener("click", async () => {
+      const text = shown.map(quote => `"${quote.text}"`).join("\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        copy.textContent = `Copied ${shown.length}`;
+      } catch {
+        copy.textContent = "Copy failed";
+      }
+      setTimeout(() => { copy.textContent = "Copy list"; }, 2000);
+    });
+    controls.append(countLabel, copy);
+    header.append(controls);
+    root.append(header);
     const list = element("ul", "recap-quotes");
-    for (const quote of job.recap.quotes) {
+    for (const quote of shown) {
       const item = element("li", "recap-quote");
       item.append(element("blockquote", "", `\u201c${quote.text}\u201d`));
       const meta = element("div", "recap-quote-meta");

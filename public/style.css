@@ -531,3 +531,8 @@ td .sample-label { margin-left: 4px; }
 .recap-quote blockquote { margin: 0; padding: 4px 0 4px 14px; border-left: 3px solid var(--cp-accent); font-size: 17px; line-height: 1.6; font-style: italic; }
 .recap-quote-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 0 17px; }
 .recap-quote-speaker { color: var(--cp-text-muted); font-size: 14px; }
+.recap-quotes-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 32px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--cp-border); }
+#recap-content .recap-quotes-header h3 { margin: 0; padding: 0; border: 0; }
+.recap-quotes-controls { display: flex; align-items: center; gap: 10px; }
+.recap-quotes-count { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 400; color: var(--cp-text-muted); margin: 0; }
+.recap-quotes-count select { width: auto; margin: 0; padding: 4px 8px; }

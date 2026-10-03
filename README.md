@@ -59,11 +59,13 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
     recap is written. The names list is also passed to the recap writer as spelling guidance.
   Fixes only change line text, so segment IDs, timestamps, clips and laughter links stay valid; a saved recap is
   marked out of date.
-- **Out of context quotes.** While the recap reads the raw transcript, it also nominates up to three lines per part
+- **Out of context quotes.** While the recap reads the raw transcript, it also nominates up to six lines per part
   that are funny or baffling on their own. Each must match the words of a real line (or up to three consecutive lines
-  by one speaker, since Speech splits sentences), or it is dropped. Lines followed by laughter score higher. Up to eight
-  of the best, at most two per part, appear in spoken order under **Out of context** at the end of the recap, with the
-  speaker's current name, a timestamp and a **Clip** button, and in the recap Markdown. No extra model calls; existing
+  by one speaker, since Speech splits sentences), or it is dropped. Lines followed by laughter score higher. The recap keeps a
+  ranked pool of up to 30 (ranking spreads the best across the session: two per part first, then the rest). **Out of
+  context** at the end of the recap shows the top 5, 10, 20 or all (remembered per browser) in spoken order, each with
+  the speaker's current name, a timestamp and a **Clip** button. **Copy list** copies just the quotes, one per line in
+  double quotes, and the recap Markdown includes the same number. No extra model calls; existing
   sessions get quotes when their recap is regenerated.
 - **Corrections for the next recap.** Each recap uncertainty has a **Clarify** button, and free-form corrections can
   be added below the recap. Saved corrections are stored on the session and given to the recap writer as authoritative

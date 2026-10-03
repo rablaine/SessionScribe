@@ -52,6 +52,8 @@ export const recapQuoteSchema = z.object({
   segmentId: z.string(),
   startMs: z.number().nonnegative(),
   endMs: z.number().nonnegative(),
+  // 1 = best. The browser shows the top N by rank (in spoken order); older recaps have no rank.
+  rank: z.number().int().positive().optional(),
 }).strict();
 export type RecapQuote = z.infer<typeof recapQuoteSchema>;
 const narrativeRecapSchema = z.object({
@@ -60,7 +62,7 @@ const narrativeRecapSchema = z.object({
   paragraphs: z.array(factSchema).min(1).max(162),
   uncertainties: z.array(factSchema).max(30),
   scenes: z.array(recapSceneSchema).max(500).default([]),
-  quotes: z.array(recapQuoteSchema).max(20).default([]),
+  quotes: z.array(recapQuoteSchema).max(40).default([]),
 });
 const legacyRecapSchema = z.object({
   title: z.string().min(1).max(200),
@@ -289,7 +291,13 @@ export function transcriptSrt(job: Job): string {
   ).join("\n");
 }
 
-export function recapMarkdown(job: Job): string {
+// The best `limit` quotes by rank, in the order they were said. Unranked (older) quotes keep their stored order.
+export function topQuotes(quotes: RecapQuote[], limit = Infinity): RecapQuote[] {
+  return quotes.map((quote, index) => ({ quote, rank: quote.rank ?? index + 1 }))
+    .filter(({ rank }) => rank <= limit).map(({ quote }) => quote).sort((a, b) => a.startMs - b.startMs);
+}
+
+export function recapMarkdown(job: Job, quoteLimit = Infinity): string {
   if (!job.recap) throw new Error("No recap available.");
   const byId = new Map(job.segments.map(s => [s.id, s]));
   const renderReferences = (segmentIds: string[]) => segmentIds.map(id => {
@@ -305,8 +313,9 @@ export function recapMarkdown(job: Job): string {
       `- ${markdownLiteral(item.text)}${item.segmentIds.length ? ` (${renderReferences(item.segmentIds)})` : ""}`,
     ).join("\n")}`]
     : [];
-  const quotes = job.recap.quotes?.length ? [
-    `## Out of context\n\n${job.recap.quotes.map(quote =>
+  const shown = topQuotes(job.recap.quotes ?? [], quoteLimit);
+  const quotes = shown.length ? [
+    `## Out of context\n\n${shown.map(quote =>
       `> \u201c${markdownLiteral(quote.text)}\u201d \u2014 ${markdownLiteral(displaySpeaker(job, quote.speaker))} (${timestamp(quote.startMs)})`,
     ).join("\n\n")}`,
   ] : [];

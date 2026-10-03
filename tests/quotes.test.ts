@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createDemo } from "../src/demo.js";
-import { recapMarkdown, recapSchema, type Job } from "../src/domain.js";
+import { recapMarkdown, recapSchema, topQuotes, type Job } from "../src/domain.js";
 import { generateRecap, matchQuote, selectQuotes, type RecapCaller, type RecapPhase } from "../src/recap.js";
 
 const job = (): Job => ({ ...createDemo(), demo: false });
@@ -28,12 +28,18 @@ test("quotes must be the real words of a real line, and take that line's speaker
   assert.equal(matchQuote({ text: "here in the woods. Fine, maybe the deer will", speaker: "Speaker 2", rating: 5 }, split, session), undefined);
 });
 
-test("quote selection keeps the best, at most two per part, in spoken order", () => {
+test("quote ranking spreads the best across parts, then fills with the rest, in spoken order", () => {
   const quote = (id: number, score: number, chunk: number) =>
     ({ text: `q${id}`, speaker: "speaker-1", segmentId: `S${id}`, startMs: id * 1000, endMs: id * 1000 + 500, score, chunk });
-  const picked = selectQuotes([quote(5, 5, 0), quote(1, 4, 0), quote(2, 4.5, 0), quote(9, 3, 1), quote(9, 5, 1), quote(7, 3.5, 2)], 3);
-  assert.deepEqual(picked.map(item => item.segmentId), ["S2", "S5", "S9"]);
-  assert(!("score" in picked[0]!));
+  const candidates = [quote(5, 5, 0), quote(1, 4, 0), quote(2, 4.5, 0), quote(9, 3, 1), quote(9, 5, 1), quote(7, 3.5, 2)];
+  assert.deepEqual(selectQuotes(candidates, 3).map(item => item.segmentId), ["S2", "S5", "S9"]);
+  const all = selectQuotes(candidates);
+  // Part 0 has three good quotes: two rank first, the third only after the other parts are represented.
+  assert.deepEqual(all.map(item => [item.segmentId, item.rank]), [["S1", 5], ["S2", 3], ["S5", 1], ["S7", 4], ["S9", 2]]);
+  assert(!("score" in all[0]!));
+  assert.deepEqual(topQuotes(all, 2).map(item => item.segmentId), ["S5", "S9"]);
+  // Older recaps without ranks keep their stored order.
+  assert.deepEqual(topQuotes(all.map(({ rank: _rank, ...item }) => item), 2).map(item => item.segmentId), ["S1", "S2"]);
 });
 
 test("recaps collect verified quotes from the transcript pass only, boosted by nearby laughter", async () => {
@@ -70,4 +76,5 @@ test("recap Markdown lists the out-of-context quotes with speaker names and time
   session.speakerNames = { "speaker-2": "Mira" };
   const markdown = recapMarkdown(session);
   assert.match(markdown, /## Out of context\n\n> \u201cI search the \\\*alcove\\\*\u201d \u2014 Mira \(00:00:42\)/);
+  assert.doesNotMatch(recapMarkdown(session, 0), /Out of context/);
 });
