@@ -389,7 +389,8 @@
     $("names-count").hidden = true;
     $("recap-clarifications").hidden = true;
     status("names-status", "");
-    if (user?.status === "active") void loadList();
+    // The account can change before app.js calls init(); init() then loads the list itself.
+    if (hooks && user?.status === "active") void loadList();
   }
 
   function init(appHooks) {
@@ -414,6 +415,7 @@
       await hooks.api(`/api/jobs/${job.id}/names/suggest`, { method: "POST" });
       await hooks.refresh();
     }));
+    if (window.SessionScribeAuth?.getUser()?.status === "active" && !list) void loadList();
     $("clarification-add").addEventListener("click", () => addCorrection());
     $("clarification-save").addEventListener("click", () => void run(saveCorrections));
     window.addEventListener("beforeunload", event => {
