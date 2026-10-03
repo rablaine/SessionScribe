@@ -66,11 +66,16 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
   - Storage Blob Data Contributor scoped to the single Speech-input container.
 
   There are no keys, connection strings or certificates in the app or the image.
-- **Storage.**
-  - The persistent volume is an **NFS 4.1** Azure Files share on a premium account with public network access disabled and shared-key auth disabled. There is no account key anywhere; only the private endpoint in the app's VNet can reach it.
-  - NFS requires the account's "secure transfer" flag off, so traffic is unencrypted, but it never leaves the private network.
-  - The Speech-input Blob account keeps its existing perimeter, firewall, and disabled anonymous and shared-key access. The app reaches it through its own private endpoint.
-- **Process privileges.** The container starts as root only long enough to make `/data` writable by `node`. It then drops to `node` via `setpriv` with no capabilities and `no_new_privs`. Account administration (`scribe-admin`) also runs as `node`.- **Images.** Built in ACR from an allowlisted `.dockerignore`, so `.env`, `.secrets/`, `data/` and `.private/` are never uploaded. The container runs as a non-root user (`node`).
+- **Storage (cost-driven split).** Persistent data and temporary Speech audio live in a separate
+  subscription and tenant, in one Standard storage account:
+  - HTTPS/SMB 3 only, TLS 1.2, no anonymous blob access.
+  - Access requires the account key, which is held only as a Container Apps secret.
+  - The account has a public endpoint protected by that key (the same model as many small apps). This trades
+    the private-network isolation of the previous design (about $60–80/month) for about $1–3/month.
+  - Speech reads each temporary file through a 48-hour, read-only, single-blob SAS. The file is deleted after
+    transcription, with a 3-day lifecycle rule as backup.
+  - **If the key leaks, recordings and transcripts in that account are readable.** Rotate it with
+    `az storage account keys renew`, then re-run `provision.ps1` (the share mount) and `deploy.ps1` (the app secret).- **Process privileges.** The container starts as root only long enough to make `/data` writable by `node`. It then drops to `node` via `setpriv` with no capabilities and `no_new_privs`. Account administration (`scribe-admin`) also runs as `node`.- **Images.** Built in ACR from an allowlisted `.dockerignore`, so `.env`, `.secrets/`, `data/` and `.private/` are never uploaded. The container runs as a non-root user (`node`).
 - **Deploys.** Manual only (`infra/deploy.ps1`). There is no CI/CD, no stored GitHub secrets, and nothing deploys on push.
 - **Backups.** Only the accounts database, kept for 14 days. Recordings and transcripts are not copied, so deletion and expiry are real.
 
@@ -81,7 +86,8 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
 | A friend's account is phished, or they reuse a password | Quotas cap the damage. Suspend the account from Access management, which revokes its sessions immediately. |
 | Key-based access on the shared AI account | Verified: the AI account already has `disableLocalAuth=true`, so only Entra ID tokens work. Keep it that way. |
 | No hard spending cap in Azure | Budgets only alert. `provision.ps1` creates two: one for the app's resource group and one filtered to the AI account. Both email subscription Owners at 80% and 100% of actual spend and at 100% of forecast. The per-user quotas are the real limiter. Keep the OpenAI deployment's tokens-per-minute (TPM) capacity modest. |
-| SQLite on a network share (NFS 4.1) | Safe only with one writer: rollback-journal mode, NFS byte-range locks, and the instance lock. Never raise `maxReplicas` above 1. |
+| SQLite on an SMB share | Safe only with one writer: rollback-journal mode, `nobrl`, and the instance lock. Never raise `maxReplicas` above 1. |
+| Storage account reachable from the internet (key-protected) | Accepted for cost. Keep the key only in Container Apps secrets, rotate it if it's ever exposed, and keep anonymous access off. |
 | Opus playback depends on the browser | Some embedded browsers lack Opus decoding. MP3 always works. |
 | The default `*.azurecontainerapps.io` hostname | Fine to use. A custom domain gets a free managed certificate; update `APP_PUBLIC_ORIGIN` when you switch. |
 

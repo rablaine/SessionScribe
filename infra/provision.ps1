@@ -1,5 +1,11 @@
 # One-time (re-runnable) provisioning for the hosted Session Scribe container app.
 # Reads real names from infra/deploy.local.json (gitignored). Copy deploy.example.json to start.
+#
+# Split by cost and policy:
+#   - App subscription: Container Apps environment (no VNet), container app identity, registry, logs, budgets.
+#     The AI account (Speech + OpenAI) already lives here and is used through the managed identity.
+#   - Storage subscription: one standard storage account holding the /data SMB share and the temporary
+#     Speech-input blob container. Key-based auth is required for the SMB mount, so it lives where policy allows it.
 # Creates only app-specific resources; never modifies unrelated apps, plans, or model deployments.
 param([string]$ConfigPath = (Join-Path $PSScriptRoot "deploy.local.json"))
 
@@ -19,52 +25,57 @@ $sub = $cfg.subscriptionId
 $rg = $cfg.resourceGroup
 $loc = $cfg.location
 $s = $cfg.nameSuffix
+$st = $cfg.storage
 $names = @{
     identity  = "id-session-scribe"
     registry  = "acrsessionscribe$s"
-    storage   = "stscribenfs$s"
-    share     = "session-data"
     logs      = "log-session-scribe"
-    env       = "cae-session-scribe-$s"
+    env       = "cae-session-scribe-public-$s"
     envStore  = "sessiondata"
+    share     = "session-data"
 }
 
-Write-Host "Resource group $rg"
+Write-Host "== Storage subscription: $($st.resourceGroup)/$($st.accountName)"
+if (-not (AzExists group show --subscription $st.subscriptionId -n $st.resourceGroup)) {
+    AzRun group create --subscription $st.subscriptionId -n $st.resourceGroup -l $st.location -o none
+}
+if (-not (AzExists storage account show --subscription $st.subscriptionId -g $st.resourceGroup -n $st.accountName)) {
+    # Reachable over HTTPS/SMB 3 with the account key or a short-lived SAS only; no anonymous access.
+    AzRun storage account create --subscription $st.subscriptionId -g $st.resourceGroup -n $st.accountName -l $st.location `
+        --kind StorageV2 --sku Standard_LRS --access-tier Hot --min-tls-version TLS1_2 --https-only true `
+        --allow-blob-public-access false --allow-shared-key-access true -o none
+}
+if (-not (AzExists storage share-rm show --subscription $st.subscriptionId -g $st.resourceGroup --storage-account $st.accountName -n $names.share)) {
+    AzRun storage share-rm create --subscription $st.subscriptionId -g $st.resourceGroup --storage-account $st.accountName `
+        -n $names.share --quota 100 --access-tier TransactionOptimized -o none
+}
+if (-not (AzExists storage container-rm show --subscription $st.subscriptionId -g $st.resourceGroup --storage-account $st.accountName -n $st.speechContainer)) {
+    AzRun storage container-rm create --subscription $st.subscriptionId -g $st.resourceGroup --storage-account $st.accountName `
+        -n $st.speechContainer --public-access off -o none
+}
+AzRun storage account file-service-properties update --subscription $st.subscriptionId -g $st.resourceGroup `
+    --account-name $st.accountName --enable-delete-retention true --delete-retention-days 7 -o none
+# Crash safety net: temporary Speech input is normally deleted right after transcription.
+$policy = Join-Path ([IO.Path]::GetTempPath()) "scribe-lifecycle-$([guid]::NewGuid()).json"
+try {
+    @{ rules = @(@{
+        enabled = $true; name = "delete-temporary-speech-audio"; type = "Lifecycle"
+        definition = @{
+            filters = @{ blobTypes = @("blockBlob"); prefixMatch = @("$($st.speechContainer)/") }
+            actions = @{ baseBlob = @{ delete = @{ daysAfterModificationGreaterThan = 3 } } }
+        }
+    }) } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $policy -Encoding utf8
+    AzRun storage account management-policy create --subscription $st.subscriptionId -g $st.resourceGroup `
+        --account-name $st.accountName --policy "@$policy" -o none
+} finally { Remove-Item -LiteralPath $policy -ErrorAction SilentlyContinue }
+
+Write-Host "== App subscription: $rg"
 if (-not (AzExists group show --subscription $sub -n $rg)) { AzRun group create --subscription $sub -n $rg -l $loc -o none }
 
-Write-Host "Dedicated VNet (Container Apps subnet + private endpoints)"
-$net = $cfg.network
-if (-not (AzExists network vnet show --subscription $sub -g $rg -n $net.vnetName)) {
-    AzRun network vnet create --subscription $sub -g $rg -n $net.vnetName -l $loc --address-prefixes $net.addressPrefix -o none
-}
-if (-not (AzExists network vnet subnet show --subscription $sub -g $rg --vnet-name $net.vnetName -n container-apps)) {
-    AzRun network vnet subnet create --subscription $sub -g $rg --vnet-name $net.vnetName -n container-apps `
-        --address-prefixes $net.appSubnetPrefix --delegations Microsoft.App/environments -o none
-}
-if (-not (AzExists network vnet subnet show --subscription $sub -g $rg --vnet-name $net.vnetName -n private-endpoints)) {
-    AzRun network vnet subnet create --subscription $sub -g $rg --vnet-name $net.vnetName -n private-endpoints `
-        --address-prefixes $net.privateEndpointSubnetPrefix -o none
-}
-$appSubnetId = AzRun network vnet subnet show --subscription $sub -g $rg --vnet-name $net.vnetName -n container-apps --query id -o tsv
-$peSubnetId = AzRun network vnet subnet show --subscription $sub -g $rg --vnet-name $net.vnetName -n private-endpoints --query id -o tsv
-$vnetId = AzRun network vnet show --subscription $sub -g $rg -n $net.vnetName --query id -o tsv
-
-function Ensure-PrivateEndpoint([string]$name, [string]$resourceId, [string]$group, [string]$zone) {
-    if (-not (AzExists network private-dns zone show --subscription $sub -g $rg -n $zone)) {
-        AzRun network private-dns zone create --subscription $sub -g $rg -n $zone -o none
-    }
-    if (-not (AzExists network private-dns link vnet show --subscription $sub -g $rg -z $zone -n session-scribe-vnet)) {
-        AzRun network private-dns link vnet create --subscription $sub -g $rg -z $zone -n session-scribe-vnet -v $vnetId -e false -o none
-    }
-    if (-not (AzExists network private-endpoint show --subscription $sub -g $rg -n $name)) {
-        AzRun network private-endpoint create --subscription $sub -g $rg -n $name -l $loc --subnet $peSubnetId `
-            --private-connection-resource-id $resourceId --group-id $group --connection-name $name -o none
-        AzRun network private-endpoint dns-zone-group create --subscription $sub -g $rg --endpoint-name $name `
-            -n default --private-dns-zone $zone --zone-name $group -o none
-    }
-}
 Write-Host "Managed identity"
-if (-not (AzExists identity show --subscription $sub -g $rg -n $names.identity)) { AzRun identity create --subscription $sub -g $rg -n $names.identity -l $loc -o none }
+if (-not (AzExists identity show --subscription $sub -g $rg -n $names.identity)) {
+    AzRun identity create --subscription $sub -g $rg -n $names.identity -l $loc -o none
+}
 $identity = AzJson identity show --subscription $sub -g $rg -n $names.identity
 
 Write-Host "Log Analytics workspace"
@@ -78,63 +89,40 @@ if (-not (AzExists acr show --subscription $sub -g $rg -n $names.registry)) {
 }
 $registryId = AzRun acr show --subscription $sub -g $rg -n $names.registry --query id -o tsv
 
-Write-Host "Persistent NFS file share (private endpoint only, no account keys)"
-if (-not (AzExists storage account show --subscription $sub -g $rg -n $names.storage)) {
-    # NFS 4.1 Azure Files authenticates by network location, not keys: the account has no public
-    # endpoint and is reachable only through the private endpoint in the app VNet. NFS requires the
-    # "secure transfer" (HTTPS-only) flag off; traffic stays on the private network.
-    AzRun storage account create --subscription $sub -g $rg -n $names.storage -l $loc --kind FileStorage --sku Premium_LRS `
-        --min-tls-version TLS1_2 --https-only false --allow-blob-public-access false --allow-shared-key-access false `
-        --public-network-access Disabled --default-action Deny --bypass None -o none
-}
-$storageId = AzRun storage account show --subscription $sub -g $rg -n $names.storage --query id -o tsv
-if (-not (AzExists storage share-rm show --subscription $sub --storage-account $names.storage -g $rg -n $names.share)) {
-    AzRun storage share-rm create --subscription $sub --storage-account $names.storage -g $rg -n $names.share `
-        --quota 100 --enabled-protocols NFS --root-squash NoRootSquash -o none
-}
-& az storage account file-service-properties update --subscription $sub --account-name $names.storage -g $rg `
-    --enable-delete-retention true --delete-retention-days 14 -o none --only-show-errors 2>$null
-if ($LASTEXITCODE -ne 0) { Write-Warning "File share soft delete could not be enabled; continuing." }
-
-Ensure-PrivateEndpoint "pe-session-scribe-nfs" $storageId "file" "privatelink.file.core.windows.net"
-
-Write-Host "Private endpoint to the Speech-input Blob account"
-$blobAccountId = AzRun storage account show --subscription $sub -g $cfg.blob.resourceGroup -n $cfg.blob.accountName --query id -o tsv
-Ensure-PrivateEndpoint "pe-session-scribe-blob" $blobAccountId "blob" "privatelink.blob.core.windows.net"
 Write-Host "Least-privilege role assignments for the app identity"
 $ai = $cfg.ai
 $aiId = AzRun cognitiveservices account show --subscription $sub -g $ai.resourceGroup -n $ai.accountName --query id -o tsv
-$containerScope = "$blobAccountId/blobServices/default/containers/$($cfg.blob.container)"
 $assignments = @(
     @{ role = "AcrPull"; scope = $registryId },
     @{ role = "Cognitive Services Speech User"; scope = $aiId },
-    @{ role = "Cognitive Services OpenAI User"; scope = $aiId },
-    @{ role = "Storage Blob Data Contributor"; scope = $containerScope }
+    @{ role = "Cognitive Services OpenAI User"; scope = $aiId }
 )
 foreach ($a in $assignments) {
-    $existing = @(AzJson role assignment list --subscription $sub --assignee $identity.principalId --scope $a.scope --role $a.role)
-    if ($existing.Count -eq 0) {
+    $existing = @(AzJson role assignment list --subscription $sub --scope $a.scope --role $a.role --fill-principal-name false) |
+        Where-Object { $_.principalId -eq $identity.principalId }
+    if (@($existing).Count -eq 0) {
         AzRun role assignment create --subscription $sub --assignee-object-id $identity.principalId `
             --assignee-principal-type ServicePrincipal --role $a.role --scope $a.scope -o none
     }
 }
 
-Write-Host "Container Apps environment (VNet-integrated, Consumption)"
+Write-Host "Container Apps environment (Consumption, no VNet: no load balancer or private endpoint charges)"
 if (-not (AzExists containerapp env show --subscription $sub -g $rg -n $names.env)) {
     $workspaceId = AzRun monitor log-analytics workspace show --subscription $sub -g $rg -n $names.logs --query customerId -o tsv
     $workspaceKey = AzRun monitor log-analytics workspace get-shared-keys --subscription $sub -g $rg -n $names.logs --query primarySharedKey -o tsv
-    AzRun containerapp env create --subscription $sub -g $rg -n $names.env -l $loc --enable-workload-profiles `
-        --infrastructure-subnet-resource-id $appSubnetId --internal-only false `
+    AzRun containerapp env create --subscription $sub -g $rg -n $names.env -l $loc --enable-workload-profiles false `
         --logs-destination log-analytics --logs-workspace-id $workspaceId --logs-workspace-key $workspaceKey -o none
 }
+# The SMB mount needs the storage account key; it is stored only as a Container Apps environment secret.
+$storageKey = AzRun storage account keys list --subscription $st.subscriptionId -g $st.resourceGroup -n $st.accountName --query "[0].value" -o tsv
 AzRun containerapp env storage set --subscription $sub -g $rg -n $names.env --storage-name $names.envStore `
-    --storage-type NfsAzureFile --server "$($names.storage).file.core.windows.net" `
-    --file-share "/$($names.storage)/$($names.share)" --access-mode ReadWrite -o none
-
+    --storage-type AzureFile --azure-file-account-name $st.accountName --azure-file-account-key $storageKey `
+    --azure-file-share-name $names.share --access-mode ReadWrite -o none
+$storageKey = $null
 $domain = AzRun containerapp env show --subscription $sub -g $rg -n $names.env --query properties.defaultDomain -o tsv
 
 Write-Host "Monthly budget alerts (email the subscription owners; alerts only, not a hard cap)"
-function Set-Budget([string]$scope, [string]$name, [double]$amount, [object]$filter) {
+function Set-Budget([string]$subscription, [string]$scope, [string]$name, [double]$amount, [object]$filter) {
     $notifications = @{}
     foreach ($n in @(@{ key = "actual80"; type = "Actual"; threshold = 80 }, @{ key = "actual100"; type = "Actual"; threshold = 100 },
                      @{ key = "forecast100"; type = "Forecasted"; threshold = 100 })) {
@@ -152,13 +140,16 @@ function Set-Budget([string]$scope, [string]$name, [double]$amount, [object]$fil
         AzRun rest --method put --url "https://management.azure.com$scope/providers/Microsoft.Consumption/budgets/$($name)?api-version=2023-11-01" --body "@$body" -o none
     } finally { Remove-Item -LiteralPath $body -ErrorAction SilentlyContinue }
 }
-$rgScope = "/subscriptions/$sub/resourceGroups/$rg"
-Set-Budget $rgScope "session-scribe-hosting" ([double]$cfg.app.budgetMonthlyUsd) $null
+Set-Budget $sub "/subscriptions/$sub/resourceGroups/$rg" "session-scribe-hosting" ([double]$cfg.app.budgetMonthlyUsd) $null
 if ($cfg.app.PSObject.Properties.Name -contains "aiBudgetMonthlyUsd" -and $cfg.app.aiBudgetMonthlyUsd) {
     # Speech/OpenAI spend lands on the (possibly shared) AI account, so it gets its own resource-filtered budget.
     $aiFilter = @{ dimensions = @{ name = "ResourceId"; operator = "In"; values = @($aiId) } }
-    Set-Budget "/subscriptions/$sub/resourceGroups/$($ai.resourceGroup)" "session-scribe-ai" ([double]$cfg.app.aiBudgetMonthlyUsd) $aiFilter
+    Set-Budget $sub "/subscriptions/$sub/resourceGroups/$($ai.resourceGroup)" "session-scribe-ai" ([double]$cfg.app.aiBudgetMonthlyUsd) $aiFilter
 }
+if ($st.PSObject.Properties.Name -contains "budgetMonthlyUsd" -and $st.budgetMonthlyUsd) {
+    Set-Budget $st.subscriptionId "/subscriptions/$($st.subscriptionId)/resourceGroups/$($st.resourceGroup)" "session-scribe-storage" ([double]$st.budgetMonthlyUsd) $null
+}
+
 Write-Host ""
 Write-Host "Provisioning complete."
 Write-Host "Default app URL after first deploy: https://$($cfg.app.name).$domain"

@@ -24,7 +24,8 @@ $rg = $cfg.resourceGroup
 $s = $cfg.nameSuffix
 $appName = $cfg.app.name
 $registry = "acrsessionscribe$s"
-$envName = "cae-session-scribe-$s"
+$envName = "cae-session-scribe-public-$s"
+$st = $cfg.storage
 
 if (-not $Tag) {
     $sha = (git -C $project rev-parse --short HEAD 2>$null)
@@ -57,6 +58,7 @@ if (-not $SkipBuild) {
 }
 
 $identity = AzRun identity show --subscription $sub -g $rg -n id-session-scribe -o json | Out-String | ConvertFrom-Json
+$storageKey = AzRun storage account keys list --subscription $st.subscriptionId -g $st.resourceGroup -n $st.accountName --query "[0].value" -o tsv
 $envInfo = AzRun containerapp env show --subscription $sub -g $rg -n $envName -o json | Out-String | ConvertFrom-Json
 $origin = if ($cfg.app.publicOrigin) { $cfg.app.publicOrigin } else { "https://$appName.$($envInfo.properties.defaultDomain)" }
 
@@ -78,8 +80,8 @@ $settings = [ordered]@{
     AZURE_OPENAI_ENDPOINT = $cfg.ai.openaiEndpoint
     AZURE_OPENAI_DEPLOYMENT = $cfg.ai.openaiDeployment
     AZURE_OPENAI_REASONING_EFFORT = $cfg.ai.reasoningEffort
-    AZURE_STORAGE_ACCOUNT_URL = "https://$($cfg.blob.accountName).blob.core.windows.net"
-    AZURE_STORAGE_CONTAINER = $cfg.blob.container
+    AZURE_STORAGE_ACCOUNT_URL = "https://$($st.accountName).blob.core.windows.net"
+    AZURE_STORAGE_CONTAINER = $st.speechContainer
     LAUGHTER_DETECTION_ENABLED = "true"
 }
 if ($cfg.app.PSObject.Properties.Name -contains "env") {
@@ -98,6 +100,8 @@ $spec = [ordered]@{
                 traffic = @(@{ latestRevision = $true; weight = 100 })
             }
             registries = @(@{ server = $loginServer; identity = $identity.id })
+            # Temporary Speech-input blobs live in the storage subscription; the key never leaves Azure config.
+            secrets = @(@{ name = "storage-account-key"; value = $storageKey })
         }
         template = [ordered]@{
             terminationGracePeriodSeconds = 60
@@ -105,13 +109,16 @@ $spec = [ordered]@{
                 name = "session-scribe"
                 image = $image
                 resources = @{ cpu = [double]$cfg.app.cpu; memory = $cfg.app.memory }
-                env = @($settings.GetEnumerator() | Where-Object { $_.Value } | ForEach-Object { @{ name = $_.Key; value = [string]$_.Value } })
+                env = @(@($settings.GetEnumerator() | Where-Object { $_.Value } | ForEach-Object { @{ name = $_.Key; value = [string]$_.Value } }) +
+                    @{ name = "AZURE_STORAGE_ACCOUNT_KEY"; secretRef = "storage-account-key" })
                 volumeMounts = @(@{ volumeName = "data"; mountPath = "/data" })
             })
             # Exactly one replica: SQLite and the in-process job queue assume a single writer.
             scale = @{ minReplicas = 1; maxReplicas = 1 }
             volumes = @(@{
-                name = "data"; storageType = "NfsAzureFile"; storageName = "sessiondata"
+                name = "data"; storageType = "AzureFile"; storageName = "sessiondata"
+                # nobrl keeps SQLite byte-range locks local to the replica; the app's instance lock ensures one writer.
+                mountOptions = "uid=1000,gid=1000,dir_mode=0750,file_mode=0640,nobrl,mfsymlinks,cache=strict"
             })
         }
     }

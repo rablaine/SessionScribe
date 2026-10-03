@@ -174,3 +174,17 @@ test("recap stops after two malformed responses and does not retry refusals or t
     Object.assign(config, originalConfig);
   }
 });
+
+test("speech read URLs are read-only, HTTPS-only, single-blob SAS links that expire within 48 hours", async () => {
+  const { StorageSharedKeyCredential } = await import("@azure/storage-blob");
+  const { speechReadUrl } = await import("../src/azure.js");
+  const now = new Date("2026-10-03T00:00:00Z");
+  const credential = new StorageSharedKeyCredential("fixture", Buffer.alloc(64, 1).toString("base64"));
+  const url = new URL(speechReadUrl("https://fixture.blob.core.windows.net/speech-input/abc/mono.mp3", "speech-input", "abc/mono.mp3", credential, now));
+  assert.equal(url.origin + url.pathname, "https://fixture.blob.core.windows.net/speech-input/abc/mono.mp3");
+  assert.equal(url.searchParams.get("sp"), "r");
+  assert.equal(url.searchParams.get("spr"), "https");
+  assert.equal(url.searchParams.get("sr"), "b");
+  assert.equal(url.searchParams.get("se"), "2026-10-05T00:00:00Z");
+  assert.ok(url.searchParams.get("sig"));
+});

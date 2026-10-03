@@ -1,4 +1,6 @@
-import { BlobServiceClient } from "@azure/storage-blob";
+import {
+  BlobSASPermissions, BlobServiceClient, generateBlobSASQueryParameters, SASProtocol, StorageSharedKeyCredential,
+} from "@azure/storage-blob";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { config } from "./config.js";
@@ -33,11 +35,27 @@ export function batchDefinition(job: Job, audioUrl: string) {
   };
 }
 
+// Read-only, HTTPS-only link that Speech uses to fetch one temporary blob. It expires well before the
+// temporary-audio lifecycle rule deletes the blob, and is never persisted or returned to browsers.
+export function speechReadUrl(blobUrl: string, containerName: string, blobName: string,
+  credential: StorageSharedKeyCredential, now = new Date()): string {
+  const sas = generateBlobSASQueryParameters({
+    containerName, blobName, permissions: BlobSASPermissions.parse("r"), protocol: SASProtocol.Https,
+    startsOn: new Date(now.getTime() - 5 * 60_000), expiresOn: new Date(now.getTime() + 48 * 3_600_000),
+  }, credential).toString();
+  return `${blobUrl}?${sas}`;
+}
+
 export class AzureSpeech {
   constructor(private headers = cognitiveHeaders) {}
 
+  private keyCredential() {
+    return config.storageAccountKey
+      ? new StorageSharedKeyCredential(new URL(config.storageAccountUrl).hostname.split(".")[0]!, config.storageAccountKey)
+      : undefined;
+  }
   private container() {
-    return new BlobServiceClient(config.storageAccountUrl, azureCredential())
+    return new BlobServiceClient(config.storageAccountUrl, this.keyCredential() ?? azureCredential())
       .getContainerClient(config.storageContainer);
   }
   private speechUrl(url: string) {
@@ -53,8 +71,10 @@ export class AzureSpeech {
     const container = this.container();
     const blob = container.getBlockBlobClient(blobName);
     await blob.uploadFile(file, { blobHTTPHeaders: { blobContentType: "audio/mpeg" } });
-    // Speech reads this plain URL with its own system-assigned managed identity.
-    return blob.url;
+    const key = this.keyCredential();
+    // Key mode (storage in another tenant): Speech gets a short-lived read-only SAS.
+    // Otherwise Speech reads the plain URL with its own system-assigned managed identity.
+    return key ? speechReadUrl(blob.url, config.storageContainer, blobName, key) : blob.url;
   }
 
   async submit(job: Job, audioUrl: string) {

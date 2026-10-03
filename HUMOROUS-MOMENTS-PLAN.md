@@ -1,6 +1,6 @@
 # Humorous Moments Detection and Azure Worker Plan
 
-> **Status (October 2026):** Hosting, 30-day retention, quotas and the hardening below are implemented. See [README.md](README.md#hosting-on-azure) for the deployed design (one Azure Container Apps replica, NFS-backed `DATA_DIR`, managed identity, manual deploys) and [SECURITY-REVIEW.md](SECURITY-REVIEW.md). Sections below that describe previews, a separate worker fleet, or SMB/App Service hosting are historical planning notes.
+> **Status (October 2026):** Hosting, 30-day retention, quotas and the hardening below are implemented. See [README.md](README.md#hosting-on-azure) for the deployed design (one Azure Container Apps replica, SQLite and recordings on an Azure Files share, managed identity for AI, manual deploys) and [SECURITY-REVIEW.md](SECURITY-REVIEW.md). Sections below that describe previews, a separate worker fleet, or App Service hosting are historical planning notes.
 
 
 ## 1. Decision summary

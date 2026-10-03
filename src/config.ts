@@ -12,6 +12,9 @@ const env = z.object({
   AZURE_SPEECH_API_VERSION: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).default("2025-10-15"),
   AZURE_STORAGE_ACCOUNT_URL: z.string().default(""),
   AZURE_STORAGE_CONTAINER: z.string().regex(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/).default("dnd-audio"),
+  // Optional: account key for temporary Speech-input storage that the app's identity cannot reach
+  // (e.g. another tenant). Provide it as a platform secret, never in a committed file.
+  AZURE_STORAGE_ACCOUNT_KEY: z.string().regex(/^$|^[A-Za-z0-9+/]{86}==$/).default(""),
   AZURE_STORAGE_GATEWAY_URL: z.string().default(""),
   AZURE_STORAGE_GATEWAY_SCOPE: z.string().regex(/^$|^api:\/\/[a-zA-Z0-9._-]+\/\.default$/).default(""),
   AZURE_OPENAI_ENDPOINT: z.string().default(""),
@@ -69,6 +72,7 @@ export const config = {
   speechApiVersion: env.AZURE_SPEECH_API_VERSION,
   storageAccountUrl: endpoint(env.AZURE_STORAGE_ACCOUNT_URL, [".blob.core.windows.net"]),
   storageContainer: env.AZURE_STORAGE_CONTAINER,
+  storageAccountKey: env.AZURE_STORAGE_ACCOUNT_KEY,
   storageGatewayUrl: endpoint(env.AZURE_STORAGE_GATEWAY_URL, [".azurewebsites.net"]),
   storageGatewayScope: env.AZURE_STORAGE_GATEWAY_SCOPE,
   openaiEndpoint: endpoint(env.AZURE_OPENAI_ENDPOINT, [".openai.azure.com", ".cognitiveservices.azure.com"]),
@@ -122,6 +126,9 @@ function applicationOrigin(value: string): string {
 
 if (config.storageGatewayUrl && (!config.storageGatewayScope || config.authMode !== "certificate")) {
   throw new Error("Storage gateway requires AZURE_STORAGE_GATEWAY_SCOPE and explicit certificate authentication.");
+}
+if (config.storageAccountKey && config.storageGatewayUrl) {
+  throw new Error("Use either AZURE_STORAGE_ACCOUNT_KEY or the storage gateway, not both.");
 }
 if (config.storageGatewayScope && !config.storageGatewayUrl) {
   throw new Error("AZURE_STORAGE_GATEWAY_SCOPE requires AZURE_STORAGE_GATEWAY_URL.");

@@ -20,9 +20,10 @@ The source is **public on GitHub**.
 4. **Keep the access model invitation-only.** `APP_OPEN_SIGNUP=false` in production. Every `/api` route must stay
    behind `accounts.requireActive` and, for sessions, behind the ownership check. Anything that costs Azure money
    must respect the per-user quotas (`accounts.consumeQuota`).
-5. **Do not touch unrelated Azure resources.** The AI account and the Speech-input storage account are shared or
-   pre-existing. The old storage gateway App Service and its shared plan must not be modified. Only resources in the
-   app's own resource group are managed by `infra/provision.ps1`.
+5. **Do not touch unrelated Azure resources.** The AI account is shared with other work. The old development
+   storage gateway App Service, its shared plan, and the older Speech-input storage account must not be modified.
+   `infra/provision.ps1` manages only the app's resource group (app subscription) and the storage resource group
+   (storage subscription).
 
 ## Deploying (manual, on request only)
 
@@ -43,27 +44,43 @@ npm run check; npm test; npm run build        # all must pass first
   az containerapp logs show -g <rg> -n session-scribe --tail 20
   curl.exe -s https://<app-host>/api/auth/session   # expect 200 JSON with "setupRequired":false
   ```
-- `infra/provision.ps1` is idempotent infrastructure setup (VNet, private endpoints, NFS share, ACR, Log
-  Analytics, managed identity and roles, Container Apps environment, budget alerts). Re-run it only when
-  infrastructure changes. App settings (environment variables) are defined in `infra/deploy.ps1`.
+- `infra/provision.ps1` is idempotent infrastructure setup. Re-run it only when infrastructure changes.
+  - Storage subscription: storage account, SMB share, `speech-input` container, lifecycle rule.
+  - App subscription: ACR, Log Analytics, managed identity and roles, the no-VNet Container Apps environment
+    and its share mount.
+  - Both: budget alerts.
+- App settings (environment variables) and the storage-key secret are defined in `infra/deploy.ps1`.
+- The Azure CLI must be signed in to **both** tenants, because the storage subscription is in a different tenant.
+  Use `az login --tenant <id>` for each; logins accumulate.
 
 ## Production architecture (keep these invariants)
 
-- One Container Apps replica (Consumption, 1 vCPU / 2 GiB), external HTTPS ingress, `allowInsecure: false`.
-- `DATA_DIR=/data` is an **NFS 4.1 Azure Files** share (premium, public network access off, shared keys off,
-  private endpoint only). Subscription policy forces shared-key auth off, so SMB mounts cannot be used.
-  `SQLITE_JOURNAL_MODE=DELETE` (never WAL on the share).
-- `TRUST_PROXY=1`. Container Apps ingress appends the real client IP as the **last** `X-Forwarded-For` entry,
-  which was verified in production with `LOG_FORWARDING=true`. Do not use other values; private/CGNAT hop trust
-  resolves to the ingress pod instead of the client.
-- A user-assigned managed identity handles Speech, OpenAI, Blob (container-scoped) and ACR pulls. No keys,
-  certificates or connection strings in the app. `AZURE_STORAGE_GATEWAY_*` stays blank in production.
-- The container starts as root only to fix `/data` ownership (`docker-entrypoint.sh`), then drops to the `node`
-  user with `setpriv`. Shell scripts must keep LF line endings (`.gitattributes` enforces this, and the Dockerfile
-  strips CRs defensively).
-- Region: the app's resources are in **South Central US**, because Container Apps environments could not be created
-  in Central US due to capacity. The registry and Log Analytics are in Central US, which is fine.
+The app is split across two subscriptions **on purpose, to minimize cost**:
 
+- **App subscription** (the AI account's subscription, where storage-key policies apply): one Container Apps replica
+  (Consumption, 1 vCPU / 2 GiB) in a **no-VNet** Consumption environment, which has no load balancer, private
+  endpoint or NAT charges. HTTPS ingress, `allowInsecure: false`. It also holds ACR (Basic) and Log Analytics.
+- **Storage subscription** (a personal Visual Studio subscription in another tenant, without the key-blocking
+  policy): one Standard_LRS storage account with:
+  - the SMB share mounted at `/data` (account key in the Container Apps environment storage definition);
+  - the `speech-input` blob container (temporary mono audio, 3-day lifecycle delete).
+- The previous design (VNet, private endpoints, premium NFS) cost $60–80/month because the app subscription's
+  policy force-disables shared-key access. **Do not move storage back into the app subscription** without
+  re-reading that trade-off.
+
+Invariants:
+- `SQLITE_JOURNAL_MODE=DELETE` and SMB `mountOptions` with `nobrl` (in `deploy.ps1`). Never WAL on the share.
+- `TRUST_PROXY=1`. Container Apps ingress appends the real client IP as the **last** `X-Forwarded-For` entry,
+  verified in production with `LOG_FORWARDING=true`. Other values resolve to the ingress pod, not the client.
+- Speech/OpenAI use the user-assigned managed identity (`AZURE_AUTH_MODE=managed-identity`).
+- `AZURE_STORAGE_ACCOUNT_KEY` (a Container Apps secret, `secretRef`) is used to upload temporary audio and to
+  sign a **48-hour, read-only, HTTPS-only, single-blob SAS** that Speech reads (Speech cannot authenticate into
+  the other tenant). The SAS is never persisted or sent to browsers. Never commit or print the key.
+- `AZURE_STORAGE_GATEWAY_*` stays blank in production.
+- The container starts as root only to fix `/data` ownership (`docker-entrypoint.sh`), then drops to `node` via
+  `setpriv`. Shell scripts must keep LF line endings (`.gitattributes`; the Dockerfile also strips CRs).
+- Region: South Central US for the app environment and the storage account (next to the AI account). Container
+  Apps environment creation failed in Central US for capacity reasons.
 ## Operating the hosted app
 
 Account administration runs inside the container as the app user and prints one-use links. Never pass passwords

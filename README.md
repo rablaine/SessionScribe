@@ -229,36 +229,38 @@ Playback uses your browser's native audio codecs. MP3 playback and timestamp nav
 
 ## Hosting on Azure
 
-The hosted shape is the same idea as a small "one container + SQLite on a file share" app, with the
-extra protections this workload needs:
+One small container plus SQLite on a file share, split across two subscriptions by cost and policy:
 
 ```text
 Browser ──HTTPS──> Container Apps ingress (TLS; appends client IP to X-Forwarded-For)
-                     └─ one replica (1 vCPU / 2 GiB): Node app + FFmpeg + YAMNet
-                          ├─ /data  NFS 4.1 Azure Files share (private endpoint only, no keys)
-                          │         accounts.sqlite (rollback journal), job JSON, originals, backups/
-                          ├─ Blob (private endpoint): temporary mono audio for Speech
-                          └─ Azure AI Speech + Azure OpenAI via user-assigned managed identity
+   [app subscription]  └─ one replica (1 vCPU / 2 GiB): Node app + FFmpeg + YAMNet
+                            ├─ Azure AI Speech + Azure OpenAI via user-assigned managed identity
+                            │
+   [storage subscription]   ├─ /data  SMB Azure Files share (account key held as a Container Apps secret)
+                            │         accounts.sqlite (rollback journal), job JSON, originals, backups/
+                            └─ Blob "speech-input": temporary mono audio; Speech reads it via a
+                               48-hour read-only SAS link; deleted after transcription (3-day safety net)
 ```
 
+- **Why split?** The app subscription's policy forbids storage account keys, so an SMB mount there needs
+  a premium NFS share, private endpoints and a VNet (about $60–80/month). A standard key-authenticated share
+  in a subscription without that policy costs about $1–3/month. Compute and AI stay in the app subscription.
 - **Exactly one replica** (`minReplicas = maxReplicas = 1`). SQLite and the in-process job queue assume
   one writer; `.instance.lock` in `DATA_DIR` enforces it. During a rollout the new replica answers
   "starting" for a few seconds until the old one releases the lock, then resumes any in-flight jobs.
-- **No storage keys or public storage.** The NFS share's account has public network access and
-  shared-key auth disabled; only the private endpoint in the app's VNet reaches it. The Speech-input
-  Blob account is reached through its own private endpoint.
-- **No stored cloud credentials in the app.** Speech, OpenAI, Blob and image pulls use a user-assigned
-  managed identity with only AcrPull, Speech User, OpenAI User and container-scoped Blob Data Contributor.
+- **Secrets.** The only secret is the storage account key, held as a Container Apps secret (for the SMB
+  mount and for signing Speech's read-only links). Speech and OpenAI use the managed identity; nothing is
+  stored in the repository, the image or on the developer machine.
 - **Least privilege in the container.** The entrypoint fixes `/data` ownership as root, then drops to
   the `node` user with no capabilities.
 - **Backups.** Every day the app writes a consistent copy of `accounts.sqlite` (users, ownership,
-  clip ranges) to `/data/backups/`, keeping 14. Recordings and transcripts are deliberately not
-  copied, so deleting a session or expiring a recording is not undone by a hidden copy.
-- **Cost guardrails.** Per-user daily quotas in the app, plus two Azure budget alerts (the app's resource group and the AI account) created by `provision.ps1`. Budgets alert; they do not cap.
+  clip ranges) to `/data/backups/`, keeping 14. File-share soft delete keeps deleted files for 7 days.
+  Recordings and transcripts are deliberately not copied elsewhere.
+- **Cost guardrails.** Per-user daily quotas in the app, plus budget alerts on the app resource group,
+  the AI account and the storage resource group. Budgets alert; they do not cap.
 
-Approximate monthly cost: Container Apps ≈ $22 (idle-rate single replica), premium NFS share (100 GiB) ≈ $16,
-two private endpoints ≈ $15, container registry ≈ $5, logs ≈ $1, plus Speech/OpenAI usage.
-
+Approximate fixed hosting cost: app subscription ≈ $29/month (container ≈ $24 at the idle rate, registry $5,
+logs ≈ $0); storage subscription ≈ $1–3/month. Speech and OpenAI are billed per use.
 ### Provision (once, re-runnable)
 
 ```powershell
@@ -266,10 +268,11 @@ Copy-Item infra\deploy.example.json infra\deploy.local.json   # gitignored; fill
 .\infra\provision.ps1
 ```
 
-`provision.ps1` creates only app-specific resources in its own resource group: VNet, private
-endpoints, NFS storage, registry, Log Analytics, identity and Container Apps environment. It also
-creates the identity's role assignments and the budget alerts. It does not change unrelated apps,
-plans or model deployments.
+`provision.ps1` creates only app-specific resources. In the storage subscription, it creates the storage
+account, file share, Speech-input container and lifecycle rule. In the app subscription, it creates the
+registry, Log Analytics, managed identity and roles, the no-VNet Container Apps environment and its
+share mount, plus the budget alerts. Sign the Azure CLI in to both tenants first (`az login --tenant ...`).
+It does not change unrelated apps, plans or model deployments.
 
 ### Deploy (manual, whenever you choose)
 
