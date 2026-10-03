@@ -637,6 +637,24 @@ function renderRecap(job) {
     }
     root.append(list);
   }
+  if (job.recap.quotes?.length) {
+    root.append(element("h3", "", "Out of context"));
+    const list = element("ul", "recap-quotes");
+    for (const quote of job.recap.quotes) {
+      const item = element("li", "recap-quote");
+      item.append(element("blockquote", "", `\u201c${quote.text}\u201d`));
+      const meta = element("div", "recap-quote-meta");
+      meta.append(element("span", "recap-quote-speaker", `\u2014 ${speakerName(job, quote.speaker)}`));
+      const reference = element("button", "evidence", time(quote.startMs));
+      reference.type = "button";
+      reference.title = `Play from ${time(quote.startMs)}`;
+      reference.addEventListener("click", () => seekRecording(quote.startMs));
+      meta.append(reference, clipButton(quote));
+      item.append(meta);
+      list.append(item);
+    }
+    root.append(list);
+  }
   if (job.recap.scenes?.length) {
     const navigation = element("details", "recap-navigation");
     navigation.append(element("summary", "", "Recording navigation"));

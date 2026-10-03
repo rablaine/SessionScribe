@@ -83,6 +83,8 @@ Invariants:
   automatically (after transcription, before the recap). AI checks run as the runner's `names` operation, share
   `recapSlots`, and consume the recap quota. Owner corrections (`job.clarifications`) and the names list reach every
   recap model call; keep them as data in the user message.
+- Out-of-context quotes (`matchQuote`/`selectQuotes` in `src/recap.ts`) are picked only in the level-0 extraction pass
+  and must match real transcript words; never display a quote that wasn't verified against a segment.
 - Voice leveling: `LEVELING_FILTER` in `src/audio.ts` is used for the Speech copy (`SPEECH_INPUT_LEVELING`) and for
   clip exports (`?balanced=0` turns it off); browser playback uses Web Audio (`public/audio-balance.js`). Never
   modify the stored original recording.

@@ -526,3 +526,8 @@ td .sample-label { margin-left: 4px; }
 .clarification-row-controls textarea { flex: 1; margin: 0; }
 .clarify-button { margin-left: 4px; }
 @media (max-width: 720px) { .recap-clarifications { padding: 0 20px 32px; } }
+/* Out-of-context quotes */
+.recap-quotes { list-style: none; padding-left: 0 !important; display: grid; gap: 14px; }
+.recap-quote blockquote { margin: 0; padding: 4px 0 4px 14px; border-left: 3px solid var(--cp-accent); font-size: 17px; line-height: 1.6; font-style: italic; }
+.recap-quote-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 0 17px; }
+.recap-quote-speaker { color: var(--cp-text-muted); font-size: 14px; }

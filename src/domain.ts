@@ -45,12 +45,22 @@ const recapSceneSchema = z.object({
   startMs: z.number().nonnegative(),
   endMs: z.number().nonnegative(),
 }).refine(scene => scene.endMs >= scene.startMs, { message: "Scene end must not precede its start." });
+// A verbatim transcript line picked because it is funny or baffling out of context; always tied to a real segment.
+export const recapQuoteSchema = z.object({
+  text: z.string().min(1).max(300),
+  speaker: z.string().max(100),
+  segmentId: z.string(),
+  startMs: z.number().nonnegative(),
+  endMs: z.number().nonnegative(),
+}).strict();
+export type RecapQuote = z.infer<typeof recapQuoteSchema>;
 const narrativeRecapSchema = z.object({
   title: z.string().min(1).max(200),
   // Older category recaps can migrate into up to 162 narrative items.
   paragraphs: z.array(factSchema).min(1).max(162),
   uncertainties: z.array(factSchema).max(30),
   scenes: z.array(recapSceneSchema).max(500).default([]),
+  quotes: z.array(recapQuoteSchema).max(20).default([]),
 });
 const legacyRecapSchema = z.object({
   title: z.string().min(1).max(200),
@@ -73,7 +83,7 @@ export const recapSchema = z.union([narrativeRecapSchema, legacyRecapSchema]).tr
     ...recap.unresolvedThreads,
   ];
   if (!paragraphs.length) throw new Error("Recap returned no narrative.");
-  return { title: recap.title, paragraphs, uncertainties: recap.uncertainties, scenes: [] };
+  return { title: recap.title, paragraphs, uncertainties: recap.uncertainties, scenes: [], quotes: [] };
 });
 export type Recap = z.infer<typeof recapSchema>;
 export const recapKeys = ["paragraphs", "uncertainties"] as const;
@@ -295,6 +305,11 @@ export function recapMarkdown(job: Job): string {
       `- ${markdownLiteral(item.text)}${item.segmentIds.length ? ` (${renderReferences(item.segmentIds)})` : ""}`,
     ).join("\n")}`]
     : [];
+  const quotes = job.recap.quotes?.length ? [
+    `## Out of context\n\n${job.recap.quotes.map(quote =>
+      `> \u201c${markdownLiteral(quote.text)}\u201d \u2014 ${markdownLiteral(displaySpeaker(job, quote.speaker))} (${timestamp(quote.startMs)})`,
+    ).join("\n\n")}`,
+  ] : [];
   const scenes = job.recap.scenes.length ? [
     `## Recording navigation\n\nSource-chunk time ranges, not verified citations for the prose.\n\n${
       job.recap.scenes.map(scene =>
@@ -306,6 +321,7 @@ export function recapMarkdown(job: Job): string {
     ...(job.recapStale ? ["> OUT OF DATE: The transcript has changed since this recap was generated. Regenerate the recap to include the saved changes."] : []),
     ...narrative,
     ...uncertainties,
+    ...quotes,
     ...scenes,
   ].join("\n\n");
 }

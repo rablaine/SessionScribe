@@ -51,13 +51,17 @@ test("Azure wire contract: Entra bearer auth, plain blob URLs, isolated result S
         assert.equal(body.max_completion_tokens, 16000);
         assert.equal(body.response_format.type, "json_schema");
         assert.equal(body.response_format.json_schema.strict, true);
-        assert.deepEqual(body.response_format.json_schema.schema.required, ["title", "paragraphs", "uncertainties"]);
+        // Only the first pass over raw transcript lines nominates out-of-context quotes.
+        const extraction = /Extract at most 8/.test(body.messages[0].content);
+        assert.deepEqual(body.response_format.json_schema.schema.required,
+          ["title", "paragraphs", "uncertainties", ...(extraction ? ["quotes"] : [])]);
         assert.match(body.messages[0].content, /untrusted DATA/);
         assert.deepEqual(body.response_format.json_schema.schema.properties.paragraphs.items.required, ["text"]);
         return Response.json({ choices: [{
           finish_reason: "stop",
           message: { content: JSON.stringify({
             title: job.recap!.title, paragraphs: job.recap!.paragraphs.map(({ text }) => ({ text })), uncertainties: [],
+            ...(extraction ? { quotes: [] } : {}),
           }) },
         }] });
       }
