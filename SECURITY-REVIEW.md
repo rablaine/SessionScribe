@@ -1,6 +1,6 @@
 # Security review: Session Scribe
 
-**Last updated:** 2026-10-02
+**Last updated:** 2026-10-03
 **Scope:** The whole codebase (`src/`, `public/`, `detector/`, `infra/`, `Dockerfile`), its git history, and the hosted Azure Container Apps design.
 **Threat model:** The source is public. The app runs on the owner's Azure subscription for a few invited friends. The main risks are:
 - someone getting past the invitation/allowlist gate;
@@ -33,6 +33,7 @@ This file deliberately contains no real resource names, IDs, hostnames or email 
 | 16 | Info | Open (email-free) invitations added at the owner's request | **Designed safely.** Admin-only, single-use, 72-hour expiry, hashed at rest, revocable in bulk. They create new accounts only and can never set the password of an existing account. The redeeming email is recorded. Whoever holds the link can sign up, so share it privately |
 | 17 | Info | Per-upload consent checkbox replaced by a one-time, per-account acknowledgement (owner request) | **Enforced server-side.** `POST /api/uploads` returns 403 until the account has accepted the current `CONSENT_VERSION`. The acknowledgement is audited and re-requested when the version is bumped |
 | 18 | Info | Recap deployment content filter relaxed for fantasy violence and in-group humor (owner request) | **Scoped.** A custom policy blocks violence and hate only at High severity (prompt and completion), and only on this app's recap deployment. Sexual, self-harm, jailbreak and protected-material filters keep their defaults. No filter is disabled |
+| 19 | Info | Names & spelling, recap corrections and voice leveling added (owner request) | **Reviewed.** New routes sit behind sign-in, CSRF and the session-ownership check; the names list is keyed to the signed-in user. The AI name check is billable, so it checks Azure readiness and the transcript size cap, reserves the session before any await, and consumes the daily recap quota; the runner re-checks that the owner is active. Transcript text, names and corrections go to the model as JSON data. Model output can't change anything by itself: each suggestion must quote text that exists in its own line, restore a listed name and stay under 200 characters, and the owner reviews it before it's applied. Inputs are bounded (300 names × 12 variants × 80 characters, 50 corrections × 500 characters, control characters rejected, 64 KB bodies). Variant matching escapes every character and uses no nested quantifiers (no ReDoS). The UI renders with `textContent` only. `?balanced=0` only switches a fixed server-side FFmpeg filter; no user input reaches FFmpeg arguments |
 
 No critical or high findings were raised in either review. `npm audit --omit=dev` reports 0 vulnerabilities.
 

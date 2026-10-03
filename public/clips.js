@@ -9,6 +9,12 @@
   let clips = [];
   const dialog = $("clip-dialog");
   const player = $("clip-player");
+  const voices = window.SessionScribeAudio;
+  voices.attach(player);
+  voices.bindToggle($("clip-even-voices"));
+  // One setting covers listening and exports, so what you preview is what you download.
+  const exportUrl = (jobId, id) => `/api/jobs/${jobId}/clips/${id}/export${voices.enabled ? "" : "?balanced=0"}`;
+  voices.onChange(() => render());
   const timeline = window.SessionScribeClipTimeline;
   const track = $("clip-track");
   let view = { startMs: 0, endMs: 1 };
@@ -469,7 +475,7 @@
       if (job.audioRetained) {
         const link = document.createElement("a");
         link.className = "quiet compact";
-        link.href = `/api/jobs/${job.id}/clips/${clip.id}/export`;
+        link.href = exportUrl(job.id, clip.id);
         link.textContent = "Export MP3";
         actions.append(link);
       } else {
@@ -503,7 +509,7 @@
       $("clip-status").textContent = "Clip saved.";
       if (exportAudio) {
         $("clip-status").textContent = "Clip saved. Preparing MP3...";
-        const response = await fetch(`/api/jobs/${id}/clips/${saved.id}/export`);
+        const response = await fetch(exportUrl(id, saved.id));
         if (!response.ok) {
           const result = await response.json();
           throw new Error(result.error || "Clip export failed.");

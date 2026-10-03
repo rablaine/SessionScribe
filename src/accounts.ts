@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import express, { type Request, type RequestHandler, type Response } from "express";
 import { z } from "zod";
+import { nameListSchema, normalizeNameList, type NameEntry } from "./names.js";
 
 export interface AccountUser {
   id: string;
@@ -165,7 +166,7 @@ export class Accounts {
     this.db = new DatabaseSync(options.databasePath);
     this.db.exec(`PRAGMA journal_mode=${options.journalMode ?? "WAL"}; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;`);
     const version = (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    if (version > 6) { this.db.close(); throw new Error("Unsupported accounts database version."); }
+    if (version > 7) { this.db.close(); throw new Error("Unsupported accounts database version."); }
     if (version === 0) this.db.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE users (
@@ -243,6 +244,15 @@ export class Accounts {
       if (!columns.includes("consentAt")) this.db.exec("ALTER TABLE users ADD COLUMN consentAt TEXT");
       this.db.exec("PRAGMA user_version=6; COMMIT;");
     }
+    if (version < 7) this.db.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE IF NOT EXISTS name_lists (
+        userId TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        entries TEXT NOT NULL, autoApply INTEGER NOT NULL DEFAULT 1, updatedAt TEXT NOT NULL
+      );
+      PRAGMA user_version=7;
+      COMMIT;
+    `);
     this.routes();
   }
 
@@ -439,6 +449,21 @@ export class Accounts {
       this.run("UPDATE users SET consentVersion=?, consentAt=? WHERE id=?", CONSENT_VERSION, new Date().toISOString(), userId);
       this.audit("user.recording-consent", userId, userId);
     });
+  }
+
+  // The owner's names list (correct spellings and known mishearings), shared by all of their sessions.
+  nameList(userId: string): { entries: NameEntry[]; autoApply: boolean } {
+    const row = this.get<{ entries: string; autoApply: number }>("SELECT entries, autoApply FROM name_lists WHERE userId=?", userId);
+    if (!row) return { entries: [], autoApply: true };
+    const parsed = nameListSchema.safeParse(JSON.parse(row.entries));
+    return { entries: parsed.success ? parsed.data : [], autoApply: Boolean(row.autoApply) };
+  }
+  saveNameList(userId: string, entries: NameEntry[], autoApply: boolean): { entries: NameEntry[]; autoApply: boolean } {
+    const normalized = normalizeNameList(nameListSchema.parse(entries));
+    this.run(`INSERT INTO name_lists(userId,entries,autoApply,updatedAt) VALUES (?,?,?,?)
+      ON CONFLICT(userId) DO UPDATE SET entries=excluded.entries, autoApply=excluded.autoApply, updatedAt=excluded.updatedAt`,
+      userId, JSON.stringify(normalized), autoApply ? 1 : 0, new Date().toISOString());
+    return { entries: normalized, autoApply };
   }
 
   // Consistent online copy for backups; works in WAL and rollback-journal modes.

@@ -86,11 +86,18 @@ export function validateRecordingMetadata(metadata: {
   return durationMs;
 }
 
-export async function normalizeAudio(executable: string, input: string, output: string, maxDurationMs?: number, signal?: AbortSignal) {
+// Dynamic normalization with a ~2 s window: lifts quiet speakers toward the level of loud ones (up to +18 dB)
+// without the pumping of a hard compressor. Used for the Speech copy and for "even out voices" clip exports.
+export const LEVELING_FILTER = "dynaudnorm=f=200:g=11:p=0.9:m=8";
+
+export async function normalizeAudio(executable: string, input: string, output: string, maxDurationMs?: number, signal?: AbortSignal, leveling = false) {
   await runTool(executable, [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", input,
     ...(maxDurationMs ? ["-t", String(maxDurationMs / 1000)] : []),
-    "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-codec:a", "libmp3lame", "-b:a", "64k", output,
+    "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
+    // Downmix and resample first so the leveling filter works on the small mono stream.
+    ...(leveling ? ["-af", `aformat=channel_layouts=mono,aresample=16000,${LEVELING_FILTER}`] : []),
+    "-codec:a", "libmp3lame", "-b:a", "64k", output,
   ], 30 * 60 * 1000, signal);
 }
 
@@ -100,10 +107,13 @@ export async function inspectDecodedDuration(executable: string, file: string): 
   return z.object({ format: z.object({ duration: z.coerce.number().nonnegative() }) }).parse(JSON.parse(output)).format.duration * 1000;
 }
 
-export async function extractAudioClip(executable: string, input: string, output: string, startMs: number, endMs: number) {
+export async function extractAudioClip(executable: string, input: string, output: string, startMs: number, endMs: number, balanced = false) {
   await runTool(executable, [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
     "-ss", String(startMs / 1000), "-i", input, "-t", String((endMs - startMs) / 1000),
-    "-map", "0:a:0", "-vn", "-codec:a", "libmp3lame", "-b:a", "192k", output,
+    "-map", "0:a:0", "-vn",
+    // A limiter after leveling keeps boosted peaks from clipping in the MP3.
+    ...(balanced ? ["-af", `${LEVELING_FILTER},alimiter=limit=0.95`] : []),
+    "-codec:a", "libmp3lame", "-b:a", "192k", output,
   ], 10 * 60 * 1000);
 }

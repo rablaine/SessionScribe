@@ -15,6 +15,7 @@ import { uploadErrorStatus, Uploads } from "./uploads.js";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { Waveforms } from "./waveform.js";
+import { registerNameRoutes } from "./name-routes.js";
 
 const publicDirectory = fileURLToPath(new URL("../public/", import.meta.url));
 
@@ -193,7 +194,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       await stat(store.audioPath(job.id));
       directory = await mkdtemp(path.join(os.tmpdir(), "scribe-clip-"));
       const output = path.join(directory, "clip.mp3");
-      await extractAudioClip(config.ffmpeg, store.audioPath(job.id), output, clip.startMs, clip.endMs);
+      await extractAudioClip(config.ffmpeg, store.audioPath(job.id), output, clip.startMs, clip.endMs, req.query.balanced !== "0");
       if (!accounts.isActiveUser(accounts.userId(req)) || !accounts.ownsJob(accounts.userId(req), job.id)) {
         res.status(403).json({ error: "Your account no longer has access." }); return;
       }
@@ -218,6 +219,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
 
   const uploads = new Uploads(store, runner, accounts);
   uploads.register(app);
+  registerNameRoutes(app, store, runner, accounts);
   app.patch("/api/jobs/:id/speakers", async (req, res) => {
     const job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }

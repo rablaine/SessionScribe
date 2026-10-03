@@ -12,6 +12,7 @@ const DEFAULTS: Record<ProgressStepKey, { baseMs: number; perAudioMinuteMs: numb
   laughter: { baseMs: 10_000, perAudioMinuteMs: 1_500 },
   waveform: { baseMs: 3_000, perAudioMinuteMs: 400 },
   transcribe: { baseMs: 60_000, perAudioMinuteMs: 12_000 },
+  names: { baseMs: 15_000, perAudioMinuteMs: 1_000 },
   recap: { baseMs: 20_000, perAudioMinuteMs: 3_000 },
   cleanup: { baseMs: 2_000, perAudioMinuteMs: 0 },
 };

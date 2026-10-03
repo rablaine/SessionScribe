@@ -77,6 +77,15 @@ Invariants:
   the Speech wait. All job writes from the runner go through `store.mutate`, because parallel branches touch the same
   job; never use a stale `store.get` and then `save`. Raising the container's vCPU count would justify a larger CPU
   semaphore.
+- Names & spelling (`src/names.ts`, `src/name-routes.ts`): the per-account names list lives in the accounts database
+  (`name_lists`, schema v7). Fixes only change segment text (never IDs or timestamps), mark a saved recap stale, and
+  AI suggestions are always reviewed by the owner before they're applied; only exact listed variants are applied
+  automatically (after transcription, before the recap). AI checks run as the runner's `names` operation, share
+  `recapSlots`, and consume the recap quota. Owner corrections (`job.clarifications`) and the names list reach every
+  recap model call; keep them as data in the user message.
+- Voice leveling: `LEVELING_FILTER` in `src/audio.ts` is used for the Speech copy (`SPEECH_INPUT_LEVELING`) and for
+  clip exports (`?balanced=0` turns it off); browser playback uses Web Audio (`public/audio-balance.js`). Never
+  modify the stored original recording.
 - Speech/OpenAI use the user-assigned managed identity (`AZURE_AUTH_MODE=managed-identity`).
 - The recap deployment uses the custom content filter `session-scribe-fantasy-violence`: violence and hate are blocked
   only at High (fantasy combat; the DM's self-deprecating in-group humor), and everything else is default. It's created

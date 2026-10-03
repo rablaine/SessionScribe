@@ -147,7 +147,7 @@ test("version-two SQLite installations preserve existing unnamed clips when addi
       assert.equal(renamed.createdAt, original.createdAt);
     } finally { migrated.close(); }
     const current = new DatabaseSync(path.join(f.root, "accounts.sqlite"));
-    assert.equal(current.prepare("PRAGMA user_version").get()?.user_version, 6);
+    assert.equal(current.prepare("PRAGMA user_version").get()?.user_version, 7);
     current.close();
   } finally { await f.close(); }
 });

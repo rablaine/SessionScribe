@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const workspace = window.SessionScribeUI;
 const accounts = window.SessionScribeAuth;
-const activeStatuses = new Set(["queued", "normalizing", "uploading", "transcribing", "summarizing"]);
+const activeStatuses = new Set(["queued", "normalizing", "uploading", "transcribing", "summarizing", "checking_names"]);
 const activeLaughterStatuses = new Set(["queued", "running"]);
 let selectedId = null;
 let currentJob = null;
@@ -70,6 +70,8 @@ function skipPlayback(deltaSeconds) {
   player.currentTime = Math.min(end, Math.max(0, player.currentTime + deltaSeconds));
   $("audio-playback-status").textContent = `Positioned at ${time(player.currentTime * 1000)}.`;
 }
+window.SessionScribeAudio.attach($("recording-player"));
+window.SessionScribeAudio.bindToggle($("even-voices"));
 $("skip-back").addEventListener("click", () => skipPlayback(-10));
 $("skip-forward").addEventListener("click", () => skipPlayback(10));
 document.addEventListener("keydown", event => {
@@ -224,7 +226,7 @@ function renderLibrary() {
   $("session-list").replaceChildren();
   const statuses = {
     queued: "Queued", normalizing: "Preparing", uploading: "Uploading",
-    transcribing: "Transcribing", summarizing: "Writing recap",
+    transcribing: "Transcribing", summarizing: "Writing recap", checking_names: "Checking names",
     transcript_ready: "Transcript ready", completed: "Ready", failed: "Failed",
   };
   for (const job of jobs) {
@@ -300,7 +302,7 @@ function renderJob(job) {
   $("recap-stale-notice").hidden = !stale;
   $("recap-stale-text").textContent = job.demo ?
     "The transcript has changed since this fictional recap. The recap is kept, but demos cannot regenerate it." :
-    "The transcript has been edited since this recap was generated. Your saved recap is kept, but is out of date.";
+    "The transcript, speaker names or corrections changed since this recap was generated. Your saved recap is kept, but is out of date.";
   $("review-recap").textContent = job.demo || !job.segments.length ? "Review recap" : "Review / Regenerate recap";
   $("speaker-panel").hidden = !job.segments.length;
   $("speaker-save").disabled = processing;
@@ -310,6 +312,7 @@ function renderJob(job) {
   if (!deletingSession) updatePlayer(job);
   renderRecap(job);
   renderLaughter(job);
+  window.SessionScribeNames?.render(job);
   for (const format of ["txt", "md", "srt", "json", "recap"]) {
     const link = $(`export-${format}`);
     link.hidden = format === "recap" ? !job.recap : !job.segments.length && job.status !== "transcript_ready";
@@ -506,7 +509,7 @@ function renderTranscript() {
 }
 
 function activateTab(tab) {
-  for (const name of ["transcript", "laughter", "recap"]) {
+  for (const name of sessionTabs) {
     $(`${name}-tab`).classList.toggle("active", name === tab);
     $(`${name}-tab`).setAttribute("aria-selected", String(name === tab));
     $(`${name}-view`).hidden = name !== tab;
@@ -609,6 +612,13 @@ function renderRecap(job) {
     const list = element("ul");
     for (const uncertainty of job.recap.uncertainties) {
       const item = element("li", "", `${uncertainty.text} `);
+      if (!job.demo) {
+        const clarify = element("button", "quiet compact clarify-button", "Clarify");
+        clarify.type = "button";
+        clarify.setAttribute("aria-label", `Clarify: ${uncertainty.text}`);
+        clarify.addEventListener("click", () => window.SessionScribeNames?.clarify(uncertainty.text));
+        item.append(clarify, document.createTextNode(" "));
+      }
       for (const id of uncertainty.segmentIds) {
         const segment = job.segments.find(value => value.id === id);
         if (!segment) {
@@ -679,7 +689,7 @@ $("detect-laughter").addEventListener("click", async () => {
     if (selectedId === id) renderLaughter(currentJob);
   }
 });
-const sessionTabs = ["transcript", "laughter", "recap"];
+const sessionTabs = ["transcript", "laughter", "recap", "names"];
 for (const [index, tab] of sessionTabs.entries()) {
   $(`${tab}-tab`).addEventListener("click", () => activateTab(tab));
   $(`${tab}-tab`).addEventListener("keydown", event => {
@@ -1016,6 +1026,7 @@ accounts.onChange(user => {
   $("session-meta").textContent = "";
   $("stage").textContent = "";
   window.SessionScribeProgress?.render(null);
+  window.SessionScribeNames?.reset(user);
   for (const id of ["session-list", "transcript-lines", "recap-content", "speaker-fields", "warnings"]) {
     $(id).replaceChildren();
   }
@@ -1032,5 +1043,13 @@ accounts.onChange(user => {
   if (user?.status === "active") {
     Promise.all([loadConfiguration(), refreshList()]).catch(error => message(error.message));
   }
+});
+window.SessionScribeNames?.init({
+  api, element, time, message,
+  current: () => currentJob,
+  show: job => { if (job.id === selectedId) { renderJob(job); void refreshList().catch(() => {}); } },
+  refresh: () => selectedId ? selectJob(selectedId) : undefined,
+  seekTime: ms => seekRecording(ms),
+  canEdit: () => Boolean(currentJob) && !savingTranscript && !transcriptDraft && !activeStatuses.has(currentJob.status),
 });
 setInterval(poll, 3000);

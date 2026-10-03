@@ -28,6 +28,8 @@ const env = z.object({
   FFMPEG_PATH: z.string().default("ffmpeg"),
   FFPROBE_PATH: z.string().default("ffprobe"),
   LAUGHTER_DETECTION_ENABLED: z.enum(["true", "false"]).default("true"),
+  // Evens out loud and quiet voices in the copy sent to Azure Speech (the stored original is never changed).
+  SPEECH_INPUT_LEVELING: z.enum(["true", "false"]).default("true"),
   PYTHON_PATH: z.string().default("python"),
   YAMNET_MODEL_PATH: z.string().default("./detector/models/yamnet"),
   LAUGHTER_DETECTOR_SCRIPT: z.string().default("./detector/detect_laughter.py"),
@@ -86,6 +88,7 @@ export const config = {
   ffmpeg: env.FFMPEG_PATH,
   ffprobe: env.FFPROBE_PATH,
   laughterEnabled: env.LAUGHTER_DETECTION_ENABLED === "true",
+  speechInputLeveling: env.SPEECH_INPUT_LEVELING === "true",
   python: env.PYTHON_PATH,
   yamnetModel: path.resolve(env.YAMNET_MODEL_PATH),
   laughterScript: path.resolve(env.LAUGHTER_DETECTOR_SCRIPT),

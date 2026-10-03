@@ -9,9 +9,11 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/ui-shell.js" defer></script>
   <script src="/accounts.js" defer></script>
+  <script src="/audio-balance.js" defer></script>
   <script src="/clip-timeline.js" defer></script>
   <script src="/clips.js" defer></script>
   <script src="/progress.js" defer></script>
+  <script src="/names.js" defer></script>
 <script src="/app.js" defer></script>
 </head>
 <body>
@@ -123,6 +125,7 @@
                 <button id="transcript-tab" role="tab" aria-selected="true" aria-controls="transcript-view" class="tab active" type="button">Transcript <span id="segment-count"></span></button>
                 <button id="laughter-tab" role="tab" aria-selected="false" aria-controls="laughter-view" class="tab" type="button">Laughter index <span id="laughter-count"></span></button>
                 <button id="recap-tab" role="tab" aria-selected="false" aria-controls="recap-view" class="tab" type="button">Session recap <span id="recap-dirty" class="dirty-badge" hidden>Out of date</span></button>
+                <button id="names-tab" role="tab" aria-selected="false" aria-controls="names-view" class="tab" type="button">Names &amp; spelling <span id="names-count" class="dirty-badge" hidden></span></button>
               </div>
               <div id="recap-stale-notice" class="recap-stale-notice" hidden><span id="recap-stale-text"></span><button id="review-recap" class="quiet" type="button">Review / Regenerate recap</button></div>
               <section id="transcript-view" role="tabpanel" aria-labelledby="transcript-tab">
@@ -138,6 +141,33 @@
               <section id="recap-view" role="tabpanel" aria-labelledby="recap-tab" hidden>
                 <div class="recap-toolbar"><p class="hint">An AI story draft. Recording navigation is approximate, not verified evidence. Review before sharing.</p><div class="exports"><button id="regenerate" class="secondary compact" type="button">Generate recap</button><a id="export-recap" class="quiet">Recap .md</a></div></div>
                 <div id="recap-content"></div>
+                <section id="recap-clarifications" class="recap-clarifications" aria-labelledby="clarifications-heading" hidden>
+                  <h3 id="clarifications-heading">Corrections for the next recap</h3>
+                  <p class="hint">Tell the recap writer what it got wrong or wasn&apos;t sure about, for example &ldquo;The town is Lostleton, not Lonelywood&rdquo;. Saved corrections are treated as facts when you regenerate.</p>
+                  <div id="clarification-rows" class="clarification-rows"></div>
+                  <div class="clarification-actions"><button id="clarification-add" class="quiet compact" type="button">Add a correction</button><button id="clarification-save" class="secondary compact" type="button" disabled>Save corrections</button><span id="clarification-status" class="hint" role="status"></span></div>
+                </section>
+              </section>
+              <section id="names-view" role="tabpanel" aria-labelledby="names-tab" hidden>
+                <div class="names-layout">
+                  <section class="names-section" aria-labelledby="names-list-heading">
+                    <h2 id="names-list-heading">Your names list</h2>
+                    <p class="hint">Correct spellings of characters, places and things in your campaign, and how the transcript tends to mishear them. Shared by all your sessions; recaps use these spellings too.</p>
+                    <div id="names-rows" class="names-rows"></div>
+                    <button id="names-add" class="quiet compact" type="button">Add a name</button>
+                    <label class="consent names-auto"><input id="names-auto" type="checkbox"><span>Automatically fix the &ldquo;heard as&rdquo; spellings in new transcripts, before the recap is written.</span></label>
+                    <div class="names-save-row"><button id="names-save" class="secondary compact" type="button" disabled>Save names list</button><span id="names-status" class="hint" role="status"></span></div>
+                  </section>
+                  <section class="names-section" aria-labelledby="names-fix-heading">
+                    <h2 id="names-fix-heading">Fix this transcript</h2>
+                    <p class="hint">Fixes change only the words, never timestamps, so clips and laughter links keep working. A saved recap is marked out of date afterwards.</p>
+                    <div class="names-fix-actions">
+                      <div><button id="names-preview" class="secondary compact" type="button">Fix &ldquo;heard as&rdquo; spellings</button><p class="hint">Instant and free: replaces exactly what you listed.</p></div>
+                      <div><button id="names-suggest" class="secondary compact" type="button">Find more with AI</button><p class="hint">Reads the transcript for other mishearings of your names (accents, split words). You review every change. Counts as one recap toward your daily limit.</p></div>
+                    </div>
+                    <div id="names-result" class="names-result" aria-live="polite"></div>
+                  </section>
+                </div>
               </section>
             </div>
             <aside class="review-inspector" aria-label="Session details">
@@ -160,6 +190,7 @@
       <button id="skip-back" class="quiet skip-button" type="button" aria-label="Back 10 seconds" title="Back 10 seconds (Shift+←)">&#x21BA; 10</button>
       <audio id="recording-player" controls preload="metadata" aria-label="Play original session recording"></audio>
       <button id="skip-forward" class="quiet skip-button" type="button" aria-label="Forward 10 seconds" title="Forward 10 seconds (Shift+→)">10 &#x21BB;</button>
+      <button id="even-voices" class="quiet voice-toggle" type="button" aria-pressed="true" title="Boost quiet speakers and tame loud ones while listening. Also applies to exported clips."><span class="voice-toggle-state" aria-hidden="true"></span>Even out voices</button>
     </div>
   </section>
   <dialog id="import-dialog" class="import-dialog" aria-labelledby="import-title" aria-describedby="import-description">
@@ -222,7 +253,7 @@
           <div class="clip-timeline-scale" aria-hidden="true"><span id="clip-view-start"></span><span id="clip-view-end"></span></div>
         </div>
         <div class="clip-waveform-status"><p id="clip-waveform-status" class="hint" role="status"></p><button id="clip-waveform-retry" class="quiet compact" type="button" hidden>Retry waveform</button></div>
-        <div class="clip-transport"><div class="clip-transport-actions"><button id="clip-preview" class="secondary compact" type="button" disabled>Play selection</button><button id="clip-replay" class="quiet compact" type="button" disabled>Replay from start</button></div><output id="clip-position" aria-label="Clip playback position"></output></div>
+        <div class="clip-transport"><div class="clip-transport-actions"><button id="clip-preview" class="secondary compact" type="button" disabled>Play selection</button><button id="clip-replay" class="quiet compact" type="button" disabled>Replay from start</button><button id="clip-even-voices" class="quiet compact voice-toggle" type="button" aria-pressed="true" title="Boost quiet speakers and tame loud ones in the preview and the exported MP3."><span class="voice-toggle-state" aria-hidden="true"></span>Even out voices</button></div><output id="clip-position" aria-label="Clip playback position"></output></div>
         <p id="clip-playback-status" class="hint" role="status"></p>
         <audio id="clip-player" preload="metadata" hidden></audio>
       </section>

@@ -81,6 +81,10 @@ const retention = new RetentionSweeper(store, {
 const backups = new DailyBackups(accounts, path.join(config.dataDir, "backups"));
 runner.buildWaveform = id => (app.locals.buildWaveform as (id: string) => Promise<void>)(id);
 runner.afterRun = id => (app.locals.finishDeletion as (id: string) => void)(id);
+runner.nameList = id => {
+  const owner = accounts.jobOwner(id);
+  return owner ? accounts.nameList(owner) : { entries: [], autoApply: false };
+};
 handler = app;
 
 for (const job of store.list()) {
@@ -93,6 +97,7 @@ for (const job of store.list()) {
     console.warn(`Session ${job.id} was not resumed because its ownership record is missing.`);
   } else if (operation === "process") {
     if (job.queuedOperation === "recap") runner.enqueueRecap(job.id);
+    else if (job.queuedOperation === "names" || job.status === "checking_names") runner.enqueueNames(job.id);
     else runner.enqueue(job.id);
   } else {
     runner.enqueueLaughter(job.id);

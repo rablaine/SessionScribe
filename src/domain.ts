@@ -78,7 +78,7 @@ export const recapSchema = z.union([narrativeRecapSchema, legacyRecapSchema]).tr
 export type Recap = z.infer<typeof recapSchema>;
 export const recapKeys = ["paragraphs", "uncertainties"] as const;
 
-export const progressStepKeys = ["prepare", "upload", "submit", "laughter", "waveform", "transcribe", "recap", "cleanup"] as const;
+export const progressStepKeys = ["prepare", "upload", "submit", "laughter", "waveform", "transcribe", "names", "recap", "cleanup"] as const;
 export type ProgressStepKey = typeof progressStepKeys[number];
 export const progressStepSchema = z.object({
   key: z.enum(progressStepKeys),
@@ -94,13 +94,38 @@ export const progressStepSchema = z.object({
 });
 export type ProgressStep = z.infer<typeof progressStepSchema>;
 export const progressSchema = z.object({
-  kind: z.enum(["process", "recap", "laughter"]),
+  kind: z.enum(["process", "recap", "laughter", "names"]),
   startedAt: z.string(),
   finishedAt: z.string().optional(),
   outcome: z.enum(["completed", "failed"]).optional(),
   steps: z.array(progressStepSchema).max(10),
 });
 export type Progress = z.infer<typeof progressSchema>;
+
+export const nameSuggestionSchema = z.object({
+  id: z.string(),
+  segmentId: z.string(),
+  before: z.string().min(1).max(200),
+  after: z.string().min(1).max(200),
+  term: z.string().max(80),
+}).strict();
+export type NameSuggestion = z.infer<typeof nameSuggestionSchema>;
+export const nameSuggestionsSchema = z.object({
+  createdAt: z.string(),
+  items: z.array(nameSuggestionSchema).max(2000),
+  // Transcript ranges the model could not review (e.g. content filter), shown so nobody assumes full coverage.
+  skipped: z.array(z.string()).max(50).default([]),
+});
+export type NameSuggestions = z.infer<typeof nameSuggestionsSchema>;
+
+export const clarificationSchema = z.object({
+  id: z.string(),
+  text: z.string().trim().min(1).max(500),
+  // The recap uncertainty this answers, when it answers one.
+  about: z.string().max(3000).optional(),
+  createdAt: z.string(),
+}).strict();
+export type Clarification = z.infer<typeof clarificationSchema>;
 
 export const jobSchema = z.object({
   id: z.uuid(),
@@ -109,7 +134,7 @@ export const jobSchema = z.object({
   audioRetained: z.boolean().default(false),
   createdAt: z.string(),
   updatedAt: z.string(),
-  status: z.enum(["queued", "normalizing", "uploading", "transcribing", "summarizing", "transcript_ready", "completed", "failed"]),
+  status: z.enum(["queued", "normalizing", "uploading", "transcribing", "summarizing", "checking_names", "transcript_ready", "completed", "failed"]),
   stage: z.string(),
   demo: z.boolean().default(false),
   locale: z.string(),
@@ -130,11 +155,15 @@ export const jobSchema = z.object({
   recordingExpiresAt: z.string().optional(),
   recordingPurgedAt: z.string().optional(),
   // Persisted so a restart resumes a queued recap as recap-only work, never as a fresh transcription.
-  queuedOperation: z.enum(["process", "recap"]).optional(),
+  queuedOperation: z.enum(["process", "recap", "names"]).optional(),
   // Step history of the latest processing run, for progress display.
   progress: progressSchema.optional(),
   // Set when the owner deletes a session that is still processing; deletion completes once work stops.
   deleteRequested: z.boolean().optional(),
+  // Facts the owner supplied after reading the recap; the recap writer treats them as authoritative.
+  clarifications: z.array(clarificationSchema).max(50).default([]),
+  // AI-proposed spelling fixes for listed names, awaiting the owner's review.
+  nameSuggestions: nameSuggestionsSchema.optional(),
 });
 export type Job = z.infer<typeof jobSchema>;
 

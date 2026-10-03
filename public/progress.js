@@ -8,13 +8,14 @@
   let ticker = null;
 
   const ICONS = { done: "\u2713", running: "\u25cf", pending: "\u25cb", failed: "\u2715" };
-  const RUN_TITLES = { process: "Processing this session", recap: "Generating the recap", laughter: "Detecting laughter" };
+  const RUN_TITLES = { process: "Processing this session", recap: "Generating the recap", laughter: "Detecting laughter", names: "Looking for misheard names" };
   // What each step makes available, so people know which tools to wait for instead of assuming something is broken.
   const UNLOCKS = {
     laughter: "laughter index",
     waveform: "clip editor waveform",
     transcribe: "transcript, search, speaker names and exports",
     recap: "story recap",
+    names: "suggested name fixes (Names & spelling tab)",
   };
 
   function duration(ms) {
@@ -91,7 +92,7 @@
       const meta = document.createElement("span");
       meta.className = "progress-step-meta";
       if (step.status === "done" && step.startedAt && step.endedAt) {
-        meta.textContent = duration(Date.parse(step.endedAt) - Date.parse(step.startedAt));
+        meta.textContent = `${step.detail ? `${step.detail} \u00b7 ` : ""}${duration(Date.parse(step.endedAt) - Date.parse(step.startedAt))}`;
       } else if (step.status === "running" && step.startedAt) {
         meta.textContent = `${step.detail ? `${step.detail} \u00b7 ` : ""}${duration(now - Date.parse(step.startedAt))}`;
       } else if (step.status === "failed") {

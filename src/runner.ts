@@ -7,10 +7,11 @@ import { StageTimings } from "./timings.js";
 import { generateRecap } from "./recap.js";
 import { JobStore } from "./store.js";
 import { LaughterDetector, type LaughterDetection } from "./laughter.js";
+import { applyNameList, callSuggestModel, suggestNameFixes, type NameEntry, type SuggestCaller } from "./names.js";
 
-export const activeStatuses = new Set(["queued", "normalizing", "uploading", "transcribing", "summarizing"]);
+export const activeStatuses = new Set(["queued", "normalizing", "uploading", "transcribing", "summarizing", "checking_names"]);
 export const activeLaughterStatuses = new Set(["queued", "running"]);
-type QueueItem = { id: string; operation: "process" | "recap" | "laughter" };
+type QueueItem = { id: string; operation: "process" | "recap" | "laughter" | "names" };
 // Speech output can be slightly longer than container metadata; differences beyond this are charged.
 const DURATION_TOLERANCE_MS = 10_000;
 const MAX_TRANSCRIPTION_MS = 4 * 60 * 60 * 1000;
@@ -24,6 +25,7 @@ const STEP_LABELS: Record<ProgressStepKey, string> = {
   laughter: "Detect laughter",
   waveform: "Build the clip editor waveform",
   transcribe: "Transcribe and identify speakers",
+  names: "Look for misheard names",
   recap: "Write the session recap",
   cleanup: "Clean up temporary files",
 };
@@ -76,6 +78,8 @@ export class JobRunner {
   buildWaveform: (id: string) => Promise<void> = async () => {};
   // Set by the server: called after a session's work stops (finishes pending deletions).
   afterRun: (id: string) => void = () => {};
+  // Set by the server: the session owner's names list and whether known misspellings are fixed automatically.
+  nameList: (id: string) => { entries: NameEntry[]; autoApply: boolean } = () => ({ entries: [], autoApply: false });
   private cancellations = new Map<string, AbortController>();
   private reserved = new Set<string>();
   // Learned stage durations; the server points this at DATA_DIR so estimates improve over time.
@@ -86,6 +90,7 @@ export class JobRunner {
     private speech = new AzureSpeech(),
     private recap = generateRecap,
     private laughter: LaughterDetection = new LaughterDetector(),
+    private suggestNames: SuggestCaller = callSuggestModel,
   ) {}
 
   enqueue(id: string) {
@@ -112,6 +117,10 @@ export class JobRunner {
     this.enqueueOperation(id, "laughter");
   }
 
+  enqueueNames(id: string) {
+    this.enqueueOperation(id, "names");
+  }
+
   private enqueueOperation(id: string, operation: QueueItem["operation"]) {
     if (this.reserved.has(id)) this.reserved.delete(id);
     else if (this.busyIds.has(id)) throw new Error("Job is already processing.");
@@ -127,6 +136,7 @@ export class JobRunner {
       void (async () => {
         try {
           if (operation === "laughter") await this.processLaughter(id);
+          else if (operation === "names") await this.processNames(id);
           else await this.process(id, operation === "recap");
         } catch (error) {
           console.error(`Session ${id} processing stopped unexpectedly; check disk access and restart if it persists.`, error);
@@ -312,6 +322,41 @@ export class JobRunner {
     await this.finishRun(id, result.laughter.status === "failed" ? "failed" : "completed");
   }
 
+  // Proposes fixes for misheard names; the owner reviews them before anything changes in the transcript.
+  private async processNames(id: string) {
+    let outcome: "completed" | "failed" = "completed";
+    try {
+      await this.plan(id, "names", [["names", false]]);
+      if (!this.canProcess(id)) throw new Error("The session owner's account is no longer active, so processing stopped.");
+      if (readiness().recapMissing.length) throw new Error("Configure Azure OpenAI to check names.");
+      const job = await this.startStep(id, "names", { status: "checking_names", stage: "Looking for misheard names", error: undefined });
+      if (this.recapSlots.busy) await this.stepUpdate(id, "names", { detail: "Waiting for a recap to finish" });
+      const suggestions = await this.recapSlots.run(() => suggestNameFixes(job, this.nameList(id).entries, async (done, total) => {
+        this.checkCancelled(id);
+        await this.stepUpdate(id, "names", { detail: `Checked ${done} of ${total} parts`, fraction: total ? done / total : 0 });
+      }, this.suggestNames, this.signal(id)));
+      this.checkCancelled(id);
+      const count = suggestions.items.length;
+      await this.endStep(id, "names", "done", {
+        nameSuggestions: suggestions, queuedOperation: undefined,
+        status: job.recap ? "completed" : "transcript_ready",
+        stage: count ? `${count} suggested name fix${count === 1 ? "" : "es"} to review` : "No misheard names found",
+      }, count ? `${count} to review` : "Nothing to fix");
+    } catch (error) {
+      outcome = "failed";
+      const message = this.cancellations.get(id)?.signal.aborted ? new CancelledError().message :
+        error instanceof Error ? error.message : "Unexpected name-check failure.";
+      console.error(`Name check for session ${id} failed: ${message}`);
+      if (this.hasStep(id, "names", "running", "pending")) await this.endStep(id, "names", "failed", {}, "Stopped with an error");
+      await this.store.mutate(id, current => ({
+        status: current.recap ? "completed" : current.segments.length ? "transcript_ready" : "failed",
+        stage: "Name check failed; the transcript is unchanged", error: message, queuedOperation: undefined,
+      }));
+    } finally {
+      await this.finishRun(id, outcome);
+    }
+  }
+
   private async process(id: string, recapOnly = false) {
     let job = this.store.get(id)!;
     let outcome: "completed" | "failed" = "completed";
@@ -338,7 +383,7 @@ export class JobRunner {
             let current = await this.startStep(id, "prepare", { status: "normalizing", stage: "Checking recording and mixing to mono for diarization", error: undefined });
             const durationMs = await inspectRecording(config.ffprobe, this.store.audioPath(id), current.originalName);
             current = await this.update(id, { durationMs, audioRetained: true });
-            await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id), MAX_TRANSCRIPTION_MS + 60_000, this.signal(id));
+            await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id), MAX_TRANSCRIPTION_MS + 60_000, this.signal(id), config.speechInputLeveling);
             this.checkCancelled(id);
             // Container metadata can understate length; bill and bound the audio Speech will actually receive.
             const decodedMs = await inspectDecodedDuration(config.ffprobe, this.store.monoPath(id));
@@ -366,10 +411,13 @@ export class JobRunner {
           await this.stepUpdate(id, "transcribe", { detail: status === "NotStarted" ? "Waiting in Azure's queue" : "Azure is transcribing" },
             { status: "transcribing", stage: `Azure Speech: ${status}. Batch processing can take minutes to hours.` });
         });
+        // Known misspellings from the owner's names list are fixed before anything (the recap included) reads the transcript.
+        const names = this.nameList(id);
+        const fixed = names.autoApply ? applyNameList(result.segments, names.entries) : { segments: result.segments, count: 0 };
         job = await this.endStep(id, "transcribe", "done", {
           status: "transcript_ready", stage: "Transcript saved",
-          segments: result.segments, warnings: [...this.store.get(id)!.warnings, ...result.warnings],
-        });
+          segments: fixed.segments, warnings: [...this.store.get(id)!.warnings, ...result.warnings],
+        }, fixed.count ? `Fixed ${fixed.count} listed name${fixed.count === 1 ? "" : "s"}` : undefined);
       }
       if (readiness().recapMissing.length) throw new Error("Transcript is ready. Configure Azure OpenAI to generate its recap.");
       if (this.recapSlots.busy) await this.stepUpdate(id, "recap", { detail: "Waiting for another recap to finish" });
@@ -379,7 +427,7 @@ export class JobRunner {
           this.checkCancelled(id);
           const fraction = recapFraction(stage);
           await this.stepUpdate(id, "recap", { detail: stage, ...(fraction === undefined ? {} : { fraction }) }, { stage });
-        });
+        }, undefined, this.nameList(id).entries.map(entry => entry.term));
         return this.endStep(id, "recap", "done", { recap, recapStale: false, status: "completed", stage: "Transcript and recap ready", queuedOperation: undefined });
       });
     } catch (error) {
