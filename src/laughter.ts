@@ -27,13 +27,13 @@ export type DetectorResult = z.infer<typeof detectorResultSchema>;
 
 export interface LaughterDetection {
   readonly enabled: boolean;
-  detect(audioPath: string, durationMs: number): Promise<DetectorResult>;
+  detect(audioPath: string, durationMs: number, signal?: AbortSignal): Promise<DetectorResult>;
 }
 
 export class LaughterDetector implements LaughterDetection {
   readonly enabled = config.laughterEnabled;
 
-  detect(audioPath: string, durationMs: number): Promise<DetectorResult> {
+  detect(audioPath: string, durationMs: number, signal?: AbortSignal): Promise<DetectorResult> {
     if (!this.enabled) throw new Error("Laughter detection is disabled.");
     const args = [
       config.laughterScript,
@@ -45,7 +45,11 @@ export class LaughterDetector implements LaughterDetection {
       "--low-threshold", String(config.laughterLowThreshold),
     ];
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(new Error("Laughter detection was cancelled.")); return; }
       const child = spawn(config.python, args, { windowsHide: true, shell: false });
+      const abort = () => child.kill();
+      signal?.addEventListener("abort", abort, { once: true });
+      child.on("close", () => signal?.removeEventListener("abort", abort));
       let stdout = "";
       let stderr = "";
       let timedOut = false;
@@ -65,6 +69,10 @@ export class LaughterDetector implements LaughterDetection {
       });
       child.on("close", code => {
         clearTimeout(timer);
+        if (signal?.aborted) {
+          reject(new Error("Laughter detection was cancelled."));
+          return;
+        }
         if (timedOut) {
           reject(new Error("Laughter detection exceeded its configured time limit."));
           return;

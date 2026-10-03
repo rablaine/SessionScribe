@@ -80,9 +80,12 @@ const retention = new RetentionSweeper(store, {
 });
 const backups = new DailyBackups(accounts, path.join(config.dataDir, "backups"));
 runner.buildWaveform = id => (app.locals.buildWaveform as (id: string) => Promise<void>)(id);
+runner.afterRun = id => (app.locals.finishDeletion as (id: string) => void)(id);
 handler = app;
 
 for (const job of store.list()) {
+  // A deletion requested before a restart is finished instead of resuming the work.
+  if (job.deleteRequested) { (app.locals.finishDeletion as (id: string) => void)(job.id); continue; }
   const operation = activeStatuses.has(job.status) ? "process" :
     activeLaughterStatuses.has(job.laughter.status) ? "laughter" : undefined;
   if (!operation) continue;

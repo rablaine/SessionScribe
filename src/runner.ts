@@ -38,6 +38,10 @@ export function recapFraction(stage: string): number | undefined {
   return /^Writing/.test(stage) ? 0.9 : undefined;
 }
 
+export class CancelledError extends Error {
+  constructor() { super("Processing was stopped because the session is being deleted."); }
+}
+
 export class Semaphore {
   private waiting: Array<() => void> = [];
   constructor(private available: number) {}
@@ -70,6 +74,9 @@ export class JobRunner {
   chargeExtraAudio: (id: string, extraMs: number) => void = () => {};
   // Set by the server: builds and caches the clip editor's waveform for a session's original recording.
   buildWaveform: (id: string) => Promise<void> = async () => {};
+  // Set by the server: called after a session's work stops (finishes pending deletions).
+  afterRun: (id: string) => void = () => {};
+  private cancellations = new Map<string, AbortController>();
   private reserved = new Set<string>();
   // Learned stage durations; the server points this at DATA_DIR so estimates improve over time.
   timings = new StageTimings();
@@ -125,7 +132,9 @@ export class JobRunner {
           console.error(`Session ${id} processing stopped unexpectedly; check disk access and restart if it persists.`, error);
         } finally {
           this.busyIds.delete(id);
+          this.cancellations.delete(id);
           this.active--;
+          try { this.afterRun(id); } catch (error) { console.error(`After-run handling for session ${id} failed:`, error); }
           this.pump();
         }
       })();
@@ -162,6 +171,7 @@ export class JobRunner {
     });
   }
   private async startStep(id: string, key: ProgressStepKey, jobPatch: Partial<Job> = {}) {
+    if (key !== "cleanup") this.checkCancelled(id);
     const resumed = this.hasStep(id, key, "running");
     // A step that was already running before a restart keeps its start time but is not used for timing stats.
     if (!resumed) this.stepStarts.set(`${id}:${key}`, Date.now());
@@ -200,6 +210,29 @@ export class JobRunner {
   // Stop taking new work. In-flight work is abandoned at process exit and resumed from persisted state.
   stop() { this.stopped = true; }
 
+  // Stops a session's work as soon as possible (kills local tools, abandons the Speech wait); cleanup still runs.
+  cancel(id: string): boolean {
+    if (!this.busyIds.has(id)) return false;
+    const queued = this.queue.findIndex(item => item.id === id);
+    if (queued >= 0) {
+      this.queue.splice(queued, 1);
+      this.busyIds.delete(id);
+      try { this.afterRun(id); } catch (error) { console.error(`After-run handling for session ${id} failed:`, error); }
+      return true;
+    }
+    this.signal(id);
+    this.cancellations.get(id)!.abort();
+    return true;
+  }
+  private signal(id: string) {
+    let controller = this.cancellations.get(id);
+    if (!controller) { controller = new AbortController(); this.cancellations.set(id, controller); }
+    return controller.signal;
+  }
+  private checkCancelled(id: string) {
+    if (this.cancellations.get(id)?.signal.aborted) throw new CancelledError();
+  }
+
   private async detectLaughter(job: Job, updateStage: boolean): Promise<Job> {
     if (job.demo || job.laughter.status === "completed" || job.laughter.status === "skipped") {
       return this.hasStep(job.id, "laughter", "pending", "running") ? this.endStep(job.id, "laughter", "skipped") : job;
@@ -222,7 +255,7 @@ export class JobRunner {
         laughter: { ...job.laughter, status: "running", error: undefined },
       });
       try {
-        const result = await this.laughter.detect(this.store.audioPath(id), durationMs);
+        const result = await this.laughter.detect(this.store.audioPath(id), durationMs, this.signal(id));
         return this.endStep(id, "laughter", "done", {
           laughter: {
             status: "completed",
@@ -305,7 +338,8 @@ export class JobRunner {
             let current = await this.startStep(id, "prepare", { status: "normalizing", stage: "Checking recording and mixing to mono for diarization", error: undefined });
             const durationMs = await inspectRecording(config.ffprobe, this.store.audioPath(id), current.originalName);
             current = await this.update(id, { durationMs, audioRetained: true });
-            await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id), MAX_TRANSCRIPTION_MS + 60_000);
+            await normalizeAudio(config.ffmpeg, this.store.audioPath(id), this.store.monoPath(id), MAX_TRANSCRIPTION_MS + 60_000, this.signal(id));
+            this.checkCancelled(id);
             // Container metadata can understate length; bill and bound the audio Speech will actually receive.
             const decodedMs = await inspectDecodedDuration(config.ffprobe, this.store.monoPath(id));
             if (decodedMs > MAX_TRANSCRIPTION_MS + 30_000) {
@@ -328,6 +362,7 @@ export class JobRunner {
         side = this.sideWork(id);
         job = await this.startStep(id, "transcribe", { status: "transcribing" });
         const result = await this.speech.waitForTranscript(job.speechJobUrl!, async status => {
+          this.checkCancelled(id);
           await this.stepUpdate(id, "transcribe", { detail: status === "NotStarted" ? "Waiting in Azure's queue" : "Azure is transcribing" },
             { status: "transcribing", stage: `Azure Speech: ${status}. Batch processing can take minutes to hours.` });
         });
@@ -341,6 +376,7 @@ export class JobRunner {
       job = await this.recapSlots.run(async () => {
         const current = await this.startStep(id, "recap", { status: "summarizing", stage: "Preparing evidence-grounded recap", error: undefined });
         const recap = await this.recap(current, async stage => {
+          this.checkCancelled(id);
           const fraction = recapFraction(stage);
           await this.stepUpdate(id, "recap", { detail: stage, ...(fraction === undefined ? {} : { fraction }) }, { stage });
         });
@@ -348,7 +384,8 @@ export class JobRunner {
       });
     } catch (error) {
       outcome = "failed";
-      const message = error instanceof Error ? error.message : "Unexpected processing failure.";
+      const message = this.cancellations.get(id)?.signal.aborted ? new CancelledError().message :
+        error instanceof Error ? error.message : "Unexpected processing failure.";
       console.error(`Job ${id} failed: ${message}`);
       job = await this.store.mutate(id, current => ({
         status: current.segments.length ? "transcript_ready" : "failed",

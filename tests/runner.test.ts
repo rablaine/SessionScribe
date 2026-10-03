@@ -338,3 +338,40 @@ test("sessions run side by side: a long Azure wait doesn't block a short session
     await rm(root, { recursive: true, force: true });
   }
 });
+test("cancelling a running session stops it at the next checkpoint, still cleans up, and reports why", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "dnd-cancel-test-"));
+  const originalConfig = { ...config };
+  Object.assign(config, {
+    speechEndpoint: "https://fixture.cognitiveservices.azure.com",
+    storageAccountUrl: "https://fixture.blob.core.windows.net", openaiEndpoint: "https://fixture.openai.azure.com",
+    openaiDeployment: "fixture", authMode: "azure-cli",
+  });
+  try {
+    const store = new JobStore(root);
+    await store.init();
+    class SlowSpeech extends FakeSpeech {
+      async waitForTranscript(_url: string, onStatus: (status: string) => Promise<void>) {
+        for (;;) { await onStatus("Running"); await delay(20); }
+      }
+    }
+    const speech = new SlowSpeech();
+    const runner = new JobRunner(store, speech, async () => createDemo().recap!, noLaughter);
+    const finished: string[] = [];
+    runner.afterRun = id => { finished.push(id); };
+    const job = await store.save({ ...createDemo(), demo: false, status: "queued" as const, segments: [], recap: undefined,
+      audioRetained: true, laughter: { status: "pending" as const, events: [] } });
+    await runTool(config.ffmpeg, ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+      "-codec:a", "libmp3lame", store.audioPath(job.id)], 10_000);
+    runner.enqueue(job.id);
+    for (let attempt = 0; attempt < 200 && !store.get(job.id)!.progress?.steps.some(step => step.key === "transcribe" && step.status === "running"); attempt++) await delay(20);
+    assert.equal(runner.cancel(job.id), true);
+    await wait(runner, job.id);
+    assert.match(store.get(job.id)!.error ?? "", /stopped because the session is being deleted/);
+    assert.equal(speech.cleanupCalls, 1, "Azure cleanup still runs");
+    assert.deepEqual(finished, [job.id]);
+    assert.equal(runner.cancel(job.id), false, "nothing to cancel once stopped");
+  } finally {
+    Object.assign(config, originalConfig);
+    await rm(root, { recursive: true, force: true });
+  }
+});

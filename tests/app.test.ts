@@ -147,11 +147,6 @@ test("chunked uploads: resumable, owner-bound, validated by ffprobe, and stamped
       body: JSON.stringify({ title: "Resume", consent: true, filename: "resume.mp3", size: mp3.length }),
     });
     const { id } = await start.json();
-    const second = await f.request(`${f.base}/api/uploads`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Second", consent: true, filename: "second.mp3", size: 10 }),
-    });
-    assert.equal(second.status, 409);
     const half = Math.floor(mp3.length / 2);
     assert.equal((await f.request(`${f.base}/api/uploads/${id}/chunk?offset=0`, {
       method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: mp3.subarray(0, half),
@@ -165,8 +160,16 @@ test("chunked uploads: resumable, owner-bound, validated by ffprobe, and stamped
     assert.equal((await (await f.request(`${f.base}/api/uploads/${id}`)).json()).received, half);
     // Other users and anonymous callers cannot see or write this upload.
     assert.equal((await fetch(`${f.base}/api/uploads/${id}`)).status, 401);
-    assert.equal((await f.request(`${f.base}/api/uploads/${id}`, { method: "DELETE" })).status, 204);
-    assert.equal((await f.request(`${f.base}/api/uploads/${id}`)).status, 404);
+    // Starting a new upload replaces an abandoned one instead of blocking for hours.
+    const replacement = await f.request(`${f.base}/api/uploads`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Replacement", consent: true, filename: "second.mp3", size: 10 }),
+    });
+    assert.equal(replacement.status, 201);
+    assert.equal((await f.request(`${f.base}/api/uploads/${id}`)).status, 404, "the abandoned upload is gone");
+    const replacementId = (await replacement.json()).id;
+    assert.equal((await f.request(`${f.base}/api/uploads/${replacementId}`, { method: "DELETE" })).status, 204);
+    assert.equal((await f.request(`${f.base}/api/uploads/${replacementId}`)).status, 404);
   } finally {
     Object.assign(config, originalConfig);
     await rm(scratch, { recursive: true, force: true });
@@ -211,7 +214,9 @@ test("parallel upload starts by one user admit exactly one; recap-only work neve
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: `Parallel ${index}`, consent: true, filename: "p.mp3", size: 1000 }),
     })));
-    assert.deepEqual(starts.map(response => response.status).sort(), [201, 409, 409, 409, 409, 409]);
+    // Admission is serialized: each start replaces the previous idle one, so exactly one upload survives.
+    assert.ok(starts.every(response => response.status === 201));
+    assert.equal((await readdir(path.join(f.root, "uploads"))).length, 1);
 
     let submitted = false;
     const job = await f.save({ ...createDemo(), demo: false, audioRetained: true, durationMs: 10_000, segments: [] });
@@ -259,6 +264,28 @@ test("recording consent is asked once per account: at sign-up or on the first im
     assert.equal((await joined.json()).user.consentAccepted, true);
   } finally {
     Object.assign(config, originalConfig);
+    await f.close();
+  }
+});
+test("deleting a session that is still processing stops the work, hides it immediately, and deletes it when work stops", async () => {
+  const f = await createSessionFixture("dnd-delete-busy-test-");
+  try {
+    const job = await f.save({ ...createDemo(), demo: false, status: "transcribing" as const, audioRetained: true });
+    f.runner.busyIds.add(job.id);
+    let cancelled = false;
+    f.runner.cancel = id => { cancelled = id === job.id; return true; };
+    const response = await f.request(`${f.base}/api/jobs/${job.id}`, { method: "DELETE" });
+    assert.equal(response.status, 202);
+    assert.equal(cancelled, true);
+    assert.equal((await f.request(`${f.base}/api/jobs/${job.id}`)).status, 404, "a session being deleted is already gone for its owner");
+    assert.deepEqual((await (await f.request(`${f.base}/api/jobs`)).json()).map((item: { id: string }) => item.id), []);
+    assert.ok(f.store.get(job.id), "files stay until the work has stopped");
+    f.runner.busyIds.delete(job.id);
+    (f.app.locals.finishDeletion as (id: string) => void)(job.id);
+    for (let attempt = 0; attempt < 50 && f.store.get(job.id); attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(f.store.get(job.id), undefined);
+    assert.equal(f.accounts.ownsJob(f.user.id, job.id), false);
+  } finally {
     await f.close();
   }
 });

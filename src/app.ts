@@ -66,7 +66,8 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
   app.use(express.json({ limit: "64kb" }));
   app.use("/api", accounts.requireActive);
   app.use("/api/jobs/:id", (req, res, next) => {
-    if (!accounts.ownsJob(accounts.userId(req), req.params.id!)) {
+    // Sessions being deleted are gone as far as the owner is concerned.
+    if (!accounts.ownsJob(accounts.userId(req), req.params.id!) || store.get(req.params.id!)?.deleteRequested) {
       res.status(404).json({ error: "Session not found." });
       return;
     }
@@ -97,7 +98,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
   });
   app.get("/api/config", (_req, res) => res.json(readiness()));
   app.get("/api/jobs", (req, res) => res.json(store.list()
-    .filter(job => accounts.ownsJob(accounts.userId(req), job.id)).map(job => ({
+    .filter(job => !job.deleteRequested && accounts.ownsJob(accounts.userId(req), job.id)).map(job => ({
     id: job.id, title: job.title, createdAt: job.createdAt, status: job.status, demo: job.demo, stage: job.stage,
   }))));
   app.get("/api/jobs/:id", (req, res) => {
@@ -326,16 +327,47 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       format === "srt" ? transcriptSrt(job) : format === "md" ? transcriptMarkdown(job) :
       format === "recap" ? recapMarkdown(job) : transcriptText(job));
   });
-  app.delete("/api/jobs/:id", async (req, res) => {
-    const job = store.get(req.params.id!);
-    if (!job) { res.status(404).json({ error: "Session not found." }); return; }
-    if (runner.busyIds.has(job.id) || activeStatuses.has(job.status) || exportingJobs.has(job.id) || waveforms.isGenerating(job.id)) { res.status(409).json({ error: "Wait for processing, waveform generation, and clip exports to finish before deleting." }); return; }
+  // Removes a session and everything it owns. Throws if Azure cleanup fails, so nothing is silently left behind.
+  const deleteNow = async (id: string) => {
+    const job = store.get(id);
+    if (!job) return;
     if (job.blobName || job.speechJobUrl) {
       const warnings = await new AzureSpeech().cleanup(job);
-      if (warnings.length) { res.status(502).json({ error: warnings.join(" ") }); return; }
+      if (warnings.length) throw Object.assign(new Error(warnings.join(" ")), { status: 502 });
     }
     await store.remove(job.id);
     accounts.releaseJob(job.id);
+  };
+  // Completes a deletion requested while the session was busy, once its work has stopped.
+  const finishDeletion = (id: string, attempt = 0): void => {
+    const job = store.get(id);
+    if (!job?.deleteRequested) return;
+    if (runner.busyIds.has(id) || exportingJobs.has(id) || waveforms.isGenerating(id)) {
+      if (attempt < 120) setTimeout(() => finishDeletion(id, attempt + 1), 5000).unref();
+      return;
+    }
+    deleteNow(id).then(() => console.log(`Session ${id} deleted after its processing stopped.`), error => {
+      console.error(`Deleting session ${id} failed: ${error instanceof Error ? error.message : error}`);
+      if (attempt < 120) setTimeout(() => finishDeletion(id, attempt + 1), 30_000).unref();
+    });
+  };
+  app.locals.finishDeletion = finishDeletion;
+  app.delete("/api/jobs/:id", async (req, res) => {
+    const job = store.get(req.params.id!);
+    if (!job) { res.status(404).json({ error: "Session not found." }); return; }
+    if (runner.busyIds.has(job.id) || exportingJobs.has(job.id) || waveforms.isGenerating(job.id)) {
+      // Accidental uploads can be deleted straight away: stop the work, then finish deleting in the background.
+      await store.mutate(job.id, () => ({ deleteRequested: true, stage: "Deleting: stopping processing" }));
+      runner.cancel(job.id);
+      finishDeletion(job.id);
+      res.status(202).json({ status: "deleting" });
+      return;
+    }
+    try { await deleteNow(job.id); }
+    catch (error) {
+      if (error instanceof Error && "status" in error && error.status === 502) { res.status(502).json({ error: error.message }); return; }
+      throw error;
+    }
     res.status(204).end();
   });
   app.use(express.static(publicDirectory));

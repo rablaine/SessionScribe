@@ -21,9 +21,13 @@ export function recordingFormat(filename: string): "mp3" | "opus" | undefined {
   return undefined;
 }
 
-export function runTool(executable: string, args: string[], timeoutMs: number): Promise<string> {
+export function runTool(executable: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error("Audio processing was cancelled.")); return; }
     const child = spawn(executable, args, { windowsHide: true, shell: false });
+    const abort = () => child.kill();
+    signal?.addEventListener("abort", abort, { once: true });
+    child.on("close", () => signal?.removeEventListener("abort", abort));
     let output = "";
     let stderr = "";
     let timedOut = false;
@@ -40,7 +44,8 @@ export function runTool(executable: string, args: string[], timeoutMs: number): 
     });
     child.on("close", code => {
       clearTimeout(timer);
-      if (timedOut) reject(new Error("Audio processing exceeded its time limit."));
+      if (signal?.aborted) reject(new Error("Audio processing was cancelled."));
+      else if (timedOut) reject(new Error("Audio processing exceeded its time limit."));
       else if (code !== 0) {
         console.error(`Audio tool exited with code ${code}: ${stderr.trim()}`);
         reject(new Error("Audio processing failed. The recording may be damaged or use an unsupported encoding."));
@@ -81,12 +86,12 @@ export function validateRecordingMetadata(metadata: {
   return durationMs;
 }
 
-export async function normalizeAudio(executable: string, input: string, output: string, maxDurationMs?: number) {
+export async function normalizeAudio(executable: string, input: string, output: string, maxDurationMs?: number, signal?: AbortSignal) {
   await runTool(executable, [
     "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", input,
     ...(maxDurationMs ? ["-t", String(maxDurationMs / 1000)] : []),
     "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-codec:a", "libmp3lame", "-b:a", "64k", output,
-  ], 30 * 60 * 1000);
+  ], 30 * 60 * 1000, signal);
 }
 
 // Duration of audio this app encoded itself (fully decoded CBR output), unlike uploader-controlled headers.

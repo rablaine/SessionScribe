@@ -119,10 +119,15 @@ export class Uploads {
       }
       const state = await this.admit(async () => {
         await this.cleanup();
-        const active = await this.active();
-        if (active.some(upload => upload.ownerId === ownerId)) {
-          throw new UploadError(409, "Finish or cancel your current upload before starting another.");
+        // One upload per person. An earlier one that isn't receiving data (closed tab, cancelled, failed) is
+        // abandoned and replaced, so an interrupted upload never blocks the next one.
+        for (const previous of (await this.active()).filter(upload => upload.ownerId === ownerId)) {
+          if (this.writing.has(previous.id)) {
+            throw new UploadError(409, "Another upload from your account is still sending data (another tab?). Finish or cancel it first.");
+          }
+          await rm(this.directory(previous.id), { recursive: true, force: true });
         }
+        const active = await this.active();
         if (active.length >= MAX_ACTIVE_UPLOADS || this.runner.busyIds.size >= MAX_QUEUED_SESSIONS) {
           throw new UploadError(429, "The server is busy with other uploads. Try again in a few minutes.");
         }

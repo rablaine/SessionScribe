@@ -79,11 +79,11 @@
       <section id="library-view" class="library-view" aria-labelledby="library-title" hidden>
         <header class="workspace-heading">
           <div><p class="eyebrow">Your sessions</p><h1 id="library-title">Session library</h1><p class="muted">Recordings, transcripts, and recaps in one place.</p></div>
-          <div class="heading-actions"><button id="demo-button" class="secondary" type="button">Explore fictional demo</button><button class="primary" type="button" data-open-import>Import recording</button></div>
+          <div class="heading-actions"><button class="primary" type="button" data-open-import>Import recording</button></div>
         </header>
         <div class="library-toolbar">
           <label class="search-field" for="library-search"><span>Search sessions</span><input id="library-search" type="search" placeholder="Search by title…" autocomplete="off"></label>
-          <label class="filter-field" for="library-filter"><span>Status</span><select id="library-filter"><option value="all">All sessions</option><option value="ready">Ready to review</option><option value="processing">Processing</option><option value="failed">Failed</option><option value="demo">Fictional demos</option></select></label>
+          <label class="filter-field" for="library-filter"><span>Status</span><select id="library-filter"><option value="all">All sessions</option><option value="ready">Ready to review</option><option value="processing">Processing</option><option value="failed">Failed</option></select></label>
         </div>
         <section class="library-card card" aria-label="Saved sessions">
           <div class="list-heading"><h2>Saved sessions</h2><span class="count-badge"><span id="session-count" aria-live="polite">0</span> total</span></div>
@@ -92,7 +92,7 @@
           <div id="library-empty" class="library-empty" hidden>
             <span class="empty-mark" aria-hidden="true">▤</span>
             <h2>Your first session starts here</h2>
-            <p>Import a recording to create a transcript, or explore a clearly fictional demo. Nothing is sent to Azure for the demo.</p>
+            <p>Import a recording to create a speaker-labelled transcript, laughter index and story recap.</p>
             <button class="primary" type="button" data-open-import>Import a recording</button>
           </div>
           <div id="library-no-results" class="library-empty" hidden><h2>No matching sessions</h2><p>Try a different title or change the status filter to All sessions.</p></div>
@@ -167,6 +167,14 @@
     <p id="import-description" class="muted">Create a speaker-labelled transcript, then review and export your session.</p>
     <form id="upload-form">
       <div id="import-error" class="error" role="alert" hidden></div>
+      <section id="upload-progress" class="upload-progress" aria-labelledby="upload-progress-title" hidden>
+        <h3 id="upload-progress-title">Uploading your recording</h3>
+        <p id="upload-progress-file" class="upload-progress-file"></p>
+        <div id="upload-progress-track" class="progress-track upload-track" role="progressbar" aria-labelledby="upload-progress-title" aria-valuemin="0" aria-valuemax="100"><div id="upload-progress-fill" class="progress-fill"></div></div>
+        <p id="upload-progress-text" class="upload-progress-text" role="status"></p>
+        <p class="upload-progress-warning"><strong>Keep this tab open until the upload finishes.</strong> After that, processing continues on the server, so you can close the tab.</p>
+      </section>
+      <div id="import-fields" class="import-fields">
       <label class="dropzone" for="audio">
         <span class="upload-icon" aria-hidden="true">↑</span>
         <strong id="file-label">Choose a recording</strong>
@@ -184,12 +192,13 @@
       <p id="consent-reminder" class="hint">Only upload sessions where everyone recorded agreed to recording and Azure processing.</p>
       <p id="retention-notice" class="hint"></p><p id="upload-help" class="hint" role="status">Azure processing is billable. Multi-hour batch jobs can take minutes to hours.</p>
       <p class="hint">Cancel closes this dialog without clearing your chosen file or entered details.</p>
-      <div class="dialog-actions"><button class="secondary" type="button" data-close-import>Cancel</button><button id="upload-button" class="primary" type="submit">Transcribe session <span aria-hidden="true">→</span></button></div>
+      </div>
+      <div class="dialog-actions"><button id="upload-cancel" class="secondary" type="button" hidden>Cancel upload</button><button class="secondary" type="button" data-close-import>Cancel</button><button id="upload-button" class="primary" type="submit">Transcribe session <span aria-hidden="true">→</span></button></div>
     </form>
   </dialog>
   <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description">
     <h2 id="delete-title">Delete this session?</h2>
-    <p id="delete-description">The local transcript, recap, and any remaining audio will be permanently removed. Download anything you want to keep first.</p>
+    <p id="delete-description">The transcript, recap, clips and recording will be permanently removed. Download anything you want to keep first.</p>
     <form method="dialog" class="dialog-actions"><button class="secondary" value="cancel" autofocus>Keep session</button><button class="primary destructive" value="delete">Delete permanently</button></form>
   </dialog>
   <dialog id="clip-dialog" class="clip-dialog" aria-labelledby="clip-title">

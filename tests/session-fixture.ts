@@ -14,12 +14,13 @@ export async function createSessionFixture(prefix: string) {
   const store = new JobStore(root);
   await store.init();
   const runner = new JobRunner(store);
-  const server = createApp(store, runner, accounts).listen(0, "127.0.0.1");
+  const app = createApp(store, runner, accounts);
+  const server = app.listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const credentials = await loginFixture(base);
   return {
-    root, store, runner, accounts, user, base, credentials,
+    root, store, runner, accounts, user, base, credentials, app,
     request(input: string | URL | Request, options: RequestInit = {}) {
       const headers = new Headers(options.headers);
       headers.set("Cookie", credentials.cookie);

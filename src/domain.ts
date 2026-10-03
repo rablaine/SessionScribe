@@ -133,6 +133,8 @@ export const jobSchema = z.object({
   queuedOperation: z.enum(["process", "recap"]).optional(),
   // Step history of the latest processing run, for progress display.
   progress: progressSchema.optional(),
+  // Set when the owner deletes a session that is still processing; deletion completes once work stops.
+  deleteRequested: z.boolean().optional(),
 });
 export type Job = z.infer<typeof jobSchema>;
 

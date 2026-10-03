@@ -26,6 +26,12 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
   the recap deployment a custom content filter that blocks violence and hate only at **High** severity, so fantasy combat
   and in-group/self-deprecating table humor aren't filtered. Sexual, self-harm, jailbreak and protected-material filters
   keep their defaults.
+- **Upload progress** is shown front and center in the import dialog: a byte-accurate progress bar, MB done, speed,
+  time left, a "keep this tab open" warning and **Cancel upload**. Starting a new upload replaces an abandoned one
+  (closed tab, cancelled), so an interrupted upload never blocks the next.
+- **Delete sessions** from the library list or the session view, even while processing. Work is stopped at the next
+  checkpoint (local tools are killed, the Azure Speech job is cleaned up), and the session disappears immediately and
+  is deleted as soon as the work has stopped. This also completes after a restart.
 - **Sessions process side by side.** Up to six sessions run at once. CPU-heavy steps (audio conversion, laughter
   detection, waveform building) take turns on the single vCPU, and recap writing allows two at a time. While Azure
   transcribes a session, its laughter detection and waveform run in parallel instead of first, and other sessions

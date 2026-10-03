@@ -242,7 +242,13 @@ function renderLibrary() {
     open.setAttribute("aria-hidden", "true");
     button.append(title, date, state, open);
     button.addEventListener("click", () => selectJob(job.id).catch(error => message(error.message)));
-    $("session-list").append(button);
+    const remove = element("button", "quiet danger library-row-delete", "Delete");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Delete ${job.title}`);
+    remove.addEventListener("click", () => confirmDelete(job));
+    const row = element("div", "library-row");
+    row.append(button, remove);
+    $("session-list").append(row);
   }
 }
 
@@ -282,7 +288,7 @@ function renderJob(job) {
   window.SessionScribeProgress?.render(job);
   const processing = activeStatuses.has(job.status) || activeLaughterStatuses.has(job.laughter.status);
   $("status-dot").className = `status-dot${processing ? " busy" : job.status === "failed" ? " failed" : ""}`;
-  $("delete-button").disabled = processing || deletingSession;
+  $("delete-button").disabled = deletingSession;
   $("job-error").textContent = job.error || "";
   $("job-error").hidden = !job.error;
   $("warnings").replaceChildren(...job.warnings.map(warning => element("p", "", warning)));
@@ -334,7 +340,7 @@ function updateEditorControls() {
   if (!currentJob) return;
   const disabled = savingTranscript || activeStatuses.has(currentJob.status);
   $("speaker-save").disabled = disabled;
-  $("delete-button").disabled = disabled || deletingSession;
+  $("delete-button").disabled = deletingSession;
   $("regenerate").disabled = disabled || !currentJob.segments.length;
   for (const control of document.querySelectorAll(".phrase-editor textarea, .phrase-editor select, .phrase-editor button, .edit-phrase")) {
     control.disabled = disabled;
@@ -688,35 +694,112 @@ for (const [index, tab] of sessionTabs.entries()) {
 
 // Large recordings are sent in resumable chunks: each request stays short (proxy timeouts) and a
 // dropped connection resumes from the last byte the server confirmed instead of restarting.
+// fetch() cannot report progress within a request; XHR does, so a slow 8 MB chunk still moves the bar.
+function putChunk(url, blob, signal, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    const csrf = accounts.getCsrfToken();
+    if (csrf) xhr.setRequestHeader("X-CSRF-Token", csrf);
+    xhr.upload.onprogress = event => onProgress(event.loaded);
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(data); return; }
+      const error = new Error(typeof data?.error === "string" ? data.error : `Request failed (${xhr.status}).`);
+      error.status = xhr.status;
+      reject(error);
+    };
+    xhr.onerror = () => reject(Object.assign(new Error("Network error during upload."), { status: 0 }));
+    xhr.onabort = () => reject(Object.assign(new Error("Upload cancelled."), { status: 0 }));
+    signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(blob);
+  });
+}
+
+let uploadAbort = null;
+let consentRecorded = false;
+const megabytes = bytes => (bytes / 1048576).toFixed(bytes < 10 * 1048576 ? 1 : 0);
+
+function showUploadProgress(state) {
+  $("upload-form").classList.toggle("is-uploading", Boolean(state));
+  $("upload-progress").hidden = !state;
+  $("upload-cancel").hidden = !state;
+  $("upload-button").hidden = Boolean(state);
+  document.querySelectorAll("#upload-form [data-close-import]").forEach(button => { button.hidden = Boolean(state); });
+  if (!state) return;
+  $("upload-progress-title").textContent = state.title;
+  $("upload-progress-file").textContent = state.file;
+  $("upload-progress-text").textContent = state.text;
+  const percent = Math.max(0, Math.min(100, Math.round(state.percent)));
+  $("upload-progress-fill").style.width = `${percent}%`;
+  $("upload-progress-track").setAttribute("aria-valuenow", String(percent));
+  $("upload-cancel").disabled = Boolean(state.finishing);
+}
+
+// Large recordings are sent in resumable chunks: each request stays short (proxy timeouts) and a
+// dropped connection resumes from the last byte the server confirmed instead of restarting.
 async function uploadRecording(file, fields) {
+  const controller = new AbortController();
+  uploadAbort = controller;
+  const fileLine = `${file.name} \u00b7 ${megabytes(file.size)} MB`;
+  showUploadProgress({ title: "Uploading your recording", file: fileLine, percent: 0, text: "Starting upload\u2026" });
   const json = { "Content-Type": "application/json" };
   const started = await api("/api/uploads", {
-    method: "POST", headers: json, body: JSON.stringify({ ...fields, filename: file.name, size: file.size }),
+    method: "POST", headers: json, body: JSON.stringify({ ...fields, filename: file.name, size: file.size }), signal: controller.signal,
   });
+  // The server records the one-time consent as soon as an upload is accepted.
+  if (fields.consent) { consentRecorded = true; syncImportConsent(); }
   let received = started.received;
   let failures = 0;
-  while (received < file.size) {
-    const end = Math.min(received + started.chunkBytes, file.size);
-    $("upload-help").textContent = `Uploading recording: ${Math.floor(received / file.size * 100)}% of ${(file.size / 1048576).toFixed(0)} MB. Keep this page open until upload finishes.`;
-    try {
-      const result = await api(`/api/uploads/${started.id}/chunk?offset=${received}`, {
-        method: "PUT", headers: { "Content-Type": "application/octet-stream" }, body: file.slice(received, end),
-      });
-      received = result.received;
-      failures = 0;
-    } catch (error) {
-      if (error.status === 401 || error.status === 403 || error.status === 404 || ++failures > 5) {
-        if (error.status !== 404) await api(`/api/uploads/${started.id}`, { method: "DELETE" }).catch(() => {});
-        throw error;
+  const startedAt = Date.now();
+  const startBytes = received;
+  const report = sent => {
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const rate = elapsed > 1 ? (sent - startBytes) / elapsed : 0;
+    const left = rate ? (file.size - sent) / rate : 0;
+    showUploadProgress({
+      title: "Uploading your recording", file: fileLine, percent: sent / file.size * 100,
+      text: `${Math.floor(sent / file.size * 100)}% \u00b7 ${megabytes(sent)} of ${megabytes(file.size)} MB` +
+        (rate ? ` \u00b7 ${megabytes(rate)} MB/s \u00b7 about ${left < 60 ? `${Math.max(1, Math.round(left))} s` : `${Math.round(left / 60)} min`} left` : ""),
+    });
+  };
+  try {
+    while (received < file.size) {
+      const end = Math.min(received + started.chunkBytes, file.size);
+      report(received);
+      try {
+        const base = received;
+        const result = await putChunk(`/api/uploads/${started.id}/chunk?offset=${received}`, file.slice(received, end),
+          controller.signal, loaded => report(base + loaded));
+        received = result.received;
+        failures = 0;
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+        if (error.status === 401 || error.status === 403 || error.status === 404 || ++failures > 5) throw error;
+        showUploadProgress({ title: "Connection interrupted", file: fileLine, percent: received / file.size * 100,
+          text: "Resuming from where it stopped\u2026" });
+        await new Promise(resolve => setTimeout(resolve, 2000 * failures));
+        received = (await api(`/api/uploads/${started.id}`, { signal: controller.signal })).received;
       }
-      $("upload-help").textContent = "Connection interrupted. Resuming the upload...";
-      await new Promise(resolve => setTimeout(resolve, 2000 * failures));
-      received = (await api(`/api/uploads/${started.id}`)).received;
     }
+  } catch (error) {
+    // The server may still be closing the interrupted chunk; retry the cleanup briefly so nothing is left behind.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try { await api(`/api/uploads/${started.id}`, { method: "DELETE" }); break; }
+      catch (cleanup) {
+        if (cleanup.status !== 409) break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    throw controller.signal.aborted ? new Error("Upload cancelled. Nothing was saved.") : error;
   }
-  $("upload-help").textContent = "Upload complete. Checking the recording...";
+  showUploadProgress({ title: "Checking the recording", file: fileLine, percent: 100, finishing: true,
+    text: "Upload complete. Making sure the file is a valid recording\u2026" });
   return api(`/api/uploads/${started.id}/complete`, { method: "POST" });
 }
+$("upload-cancel").addEventListener("click", () => uploadAbort?.abort());
 
 $("upload-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -738,36 +821,28 @@ $("upload-form").addEventListener("submit", async event => {
       maxSpeakers: Number(fields.get("maxSpeakers") || 8),
       context: String(fields.get("context") || ""),
       ...(fields.get("consent") === "true" ? { consent: true } : {}),
-    });    await selectJob(job.id);
+    });
+    await selectJob(job.id);
     activateTab("transcript");
     workspace.closeImport();
     event.target.reset();
     $("file-label").textContent = "Choose a recording";
     message("Upload accepted. Processing continues on the server; you can close this browser tab.", "notice");
   } catch (error) {
-    message(error.message);
-    importError(error.message);
+    if (/Upload cancelled/.test(error.message)) importError("");
+    else { message(error.message); importError(error.message); }
+    if (/Upload cancelled/.test(error.message)) message(error.message, "notice");
   }
   finally {
     busy = false;
+    uploadAbort = null;
+    showUploadProgress(null);
     workspace.setImportBusy(false);
     if (!accounts.getUser()?.consentAccepted) await accounts.refresh({ background: true }).catch(() => {});
     await loadConfiguration();
   }
 });
-$("demo-button").addEventListener("click", async () => {
-  if (!discardDraft()) return;
-  $("demo-button").disabled = true;
-  message("");
-  try {
-    const job = await api("/api/demo", { method: "POST" });
-    await selectJob(job.id);
-    activateTab("transcript");
-    workspace.closeImport();
-    message("Fictional demo opened. No Azure calls were made.", "notice");
-  } catch (error) { message(error.message); }
-  finally { $("demo-button").disabled = false; }
-});
+
 $("speaker-form").addEventListener("submit", async event => {
   event.preventDefault();
   if (!selectedId || savingTranscript || activeStatuses.has(currentJob.status)) return;
@@ -800,13 +875,35 @@ $("regenerate").addEventListener("click", async () => {
     await selectJob(selectedId);
   } catch (error) { message(error.message); $("regenerate").disabled = false; }
 });
-$("delete-button").addEventListener("click", () => {
-  if (!discardDraft()) return;
-  renderTranscript();
+let deleteTarget = null;
+// Works from the library or the open session; a session that is still processing is stopped, then deleted.
+function confirmDelete(job) {
+  if (deletingSession || !job) return;
+  if (job.id === selectedId && !discardDraft()) return;
+  if (job.id === selectedId) renderTranscript();
+  deleteTarget = { id: job.id, title: job.title };
+  const processing = activeStatuses.has(job.status) || (job.laughter && activeLaughterStatuses.has(job.laughter.status));
+  $("delete-title").textContent = `Delete \u201c${job.title}\u201d?`;
+  $("delete-description").textContent = (processing
+    ? "This session is still processing. Processing will be stopped and Azure's copy cleaned up. "
+    : "") + "The transcript, recap, clips and recording will be permanently removed. Download anything you want to keep first.";
   $("delete-dialog").showModal();
-});
+}
+$("delete-button").addEventListener("click", () => confirmDelete(currentJob));
 $("delete-dialog").addEventListener("close", async () => {
-  if ($("delete-dialog").returnValue !== "delete" || !selectedId || deletingSession) return;
+  const target = deleteTarget;
+  deleteTarget = null;
+  if ($("delete-dialog").returnValue !== "delete" || !target || deletingSession) return;
+  if (target.id !== selectedId) {
+    deletingSession = true;
+    try {
+      await api(`/api/jobs/${target.id}`, { method: "DELETE" });
+      await refreshList();
+      message(`\u201c${target.title}\u201d deleted.`, "notice");
+    } catch (error) { message(error.message); }
+    finally { deletingSession = false; }
+    return;
+  }
   const id = selectedId;
   const player = $("recording-player");
   const position = player.currentTime;
@@ -837,13 +934,13 @@ $("delete-dialog").addEventListener("close", async () => {
     message(`${error.message}${currentJob?.audioRetained && wasPlaying ? " Recording restored paused; press play to resume." : ""}`);
   } finally {
     deletingSession = false;
-    if (currentJob) $("delete-button").disabled = activeStatuses.has(currentJob.status);
+    if (currentJob) $("delete-button").disabled = false;
   }
 });
 
 // Recording consent is acknowledged once per account (at sign-up or on the first import), not per upload.
 function syncImportConsent() {
-  const needed = !accounts.getUser()?.consentAccepted;
+  const needed = !accounts.getUser()?.consentAccepted && !consentRecorded;
   $("import-consent").hidden = !needed;
   $("import-consent-check").required = needed;
   $("consent-reminder").hidden = needed;

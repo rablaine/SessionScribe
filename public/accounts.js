@@ -285,6 +285,8 @@
       return () => subscribers.delete(handler);
     },
     getUser: () => user,
+    // For upload requests that need XMLHttpRequest (byte-level progress) instead of fetch.
+    getCsrfToken: () => csrfToken,
     canAccessWorkspace,
     guardSignOut(handler) {
       if (typeof handler !== "function") throw new TypeError("A sign-out guard is required.");
