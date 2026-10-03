@@ -30,6 +30,7 @@ This file deliberately contains no real resource names, IDs, hostnames or email 
 | 13 | 🟡 MEDIUM | *(final review)* Parallel `POST /api/uploads` requests could all pass the per-user, global and free-disk checks, allowing a disk fill | **Fixed.** Upload admission is serialized, and free space is re-checked on every chunk |
 | 14 | 🟡 MEDIUM | *(final review)* A recap request racing a transcript wipe could trigger an unmetered re-transcription | **Fixed.** The job is reserved synchronously before any await. Recap-only work (persisted as `queuedOperation`) never transcribes, and expired recordings are never transcribed |
 | 15 | ⚪ LOW | *(final review)* Strangers could fill the email-wide failure bucket and lock a known user out for an hour | **Fixed.** A browser that has signed in before carries a 180-day HttpOnly device token that exempts it from the account-wide bucket (the OWASP device-cookie pattern) |
+| 16 | Info | Open (email-free) invitations added at the owner's request | **Designed safely.** Admin-only, single-use, 72-hour expiry, hashed at rest, revocable in bulk. They create new accounts only and can never set the password of an existing account. The redeeming email is recorded. Whoever holds the link can sign up, so share it privately |
 
 No critical or high findings were raised in either review. `npm audit --omit=dev` reports 0 vulnerabilities.
 

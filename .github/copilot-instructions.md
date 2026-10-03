@@ -89,6 +89,7 @@ on a command line.
 ```powershell
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin reset-link --email <user>"
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin invite --email <friend>"
+az containerapp exec -g <rg> -n session-scribe --command "scribe-admin open-invite"   # not bound to an email
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin bootstrap-link --email <admin>"   # only when no admin exists
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin delete-user --email <user>"
 ```

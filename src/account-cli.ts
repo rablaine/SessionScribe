@@ -34,11 +34,24 @@ const usage = `Usage:
   node dist/account-cli.js bootstrap --email you@example.com    create the first administrator (prompts for a password)
   node dist/account-cli.js bootstrap-link --email you@example.com  create the first administrator and print a one-use link to set its password
   node dist/account-cli.js invite --email friend@example.com    whitelist an email and print a one-use invitation link
+  node dist/account-cli.js open-invite                         print a one-use invitation that is not bound to an email
   node dist/account-cli.js reset-link --email user@example.com  print a one-use password-reset link (works for the admin too)
   node dist/account-cli.js delete-user --email user@example.com remove a non-admin account that owns no sessions`;
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "open-invite") {
+    const accounts = new Accounts({
+      databasePath: path.join(config.dataDir, "accounts.sqlite"),
+      publicOrigin: config.publicOrigin || undefined,
+      journalMode: config.sqliteJournalMode,
+    });
+    try {
+      const link = accounts.operatorOpenInvite();
+      process.stdout.write(`One-use open invitation (expires ${link.expiresAt}). Share it privately:\n${link.url}\nToken: ${link.token}\n`);
+    } finally { accounts.close(); }
+    return;
+  }
   // The original form "--email X" still means bootstrap.
   const [command, flag, email] = args[0] === "--email" ? ["bootstrap", ...args] : args;
   if (args.length !== (args[0] === "--email" ? 2 : 3) || flag !== "--email" || !email ||

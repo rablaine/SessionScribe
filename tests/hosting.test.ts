@@ -271,3 +271,40 @@ test("instance lock: persistent heartbeat failures past the stale window give up
     await rm(root, { recursive: true, force: true });
   }
 });
+test("open invitations let the recipient choose an email, are single-use, never take over accounts, and can be revoked", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "scribe-open-invite-"));
+  const accounts = new Accounts({ databasePath: path.join(root, "accounts.sqlite"), openSignup: false });
+  await accounts.bootstrapAdministrator(fixtureEmail, fixturePassword);
+  const store = new JobStore(root);
+  await store.init();
+  const server = createApp(store, new JobRunner(store), accounts).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const post = (url: string, body: unknown, headers: Record<string, string> = {}) => fetch(`${base}${url}`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body),
+  });
+  try {
+    const login = await post("/api/auth/login", { email: fixtureEmail, password: fixturePassword });
+    const admin = { Cookie: login.headers.getSetCookie()[0]!.split(";")[0]!, "X-CSRF-Token": (await login.json()).csrfToken };
+    const issue = async () => (await (await post("/api/admin/open-invitations", {}, admin)).json()) as { url: string; token: string };
+    const first = await issue();
+    assert.match(first.url, /#invite=[A-Za-z0-9_-]{43}$/);
+    assert.ok(first.url.endsWith(first.token));
+    // Existing accounts cannot be claimed, and the attempt does not burn the invitation.
+    const takeover = await post("/api/auth/register", { email: fixtureEmail, password: "a-long-password-1", invitationToken: first.token });
+    assert.equal(takeover.status, 400);
+    const joined = await post("/api/auth/register", { email: "Player@Example.test", password: "a-long-password-1", invitationToken: first.token });
+    assert.equal(joined.status, 202);
+    assert.equal((await joined.json()).user.status, "active");
+    assert.equal((await post("/api/auth/register", { email: "second@example.test", password: "a-long-password-1", invitationToken: first.token })).status, 400);
+    const second = await issue();
+    const revoked = await (await post("/api/admin/open-invitations/revoke", {}, admin)).json();
+    assert.equal(revoked.revoked, 1);
+    assert.equal((await post("/api/auth/register", { email: "third@example.test", password: "a-long-password-1", invitationToken: second.token })).status, 400);
+    assert.equal((await post("/api/admin/open-invitations", {})).status, 401);
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    accounts.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

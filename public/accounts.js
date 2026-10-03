@@ -91,6 +91,8 @@
     activeLink = "";
     $("issued-link-value").value = "";
     $("issued-link-expiry").textContent = "";
+    $("issued-token-value").value = "";
+    $("issued-token-label").hidden = true;
     $("issued-link-status").textContent = "";
     $("copy-issued-link").disabled = false;
     if ($("issued-link-dialog").open) $("issued-link-dialog").close();
@@ -168,9 +170,11 @@
   function renderSignupMode(open) {
     $("signup-tab").textContent = open ? "Request an account" : "Use an invitation";
     $("signup-submit").textContent = open ? "Create account / request access" : "Create account";
+    const optional = $("invitation-field").querySelector(".optional");
+    if (optional) optional.hidden = !open;
     $("signup-hint").textContent = open ?
       "Anyone may request an account. Ordinary signups stay pending until the administrator personally confirms identity and approves access. A valid invitation activates only its bound, whitelisted email." :
-      "Accounts are by invitation only. Open the one-use invitation link the administrator shared with you, or enter your email and paste its token below.";
+      "Accounts are by invitation only. Open the one-use invitation link the administrator shared with you, or enter your email and paste the invitation token below.";
   }
 
   function applySession(data, error = "") {
@@ -554,6 +558,10 @@
     activeLink = data.url;
     $("issued-link-title").textContent = title;
     $("issued-link-value").value = activeLink;
+    if (typeof data.token === "string" && data.token) {
+      $("issued-token-value").value = data.token;
+      $("issued-token-label").hidden = false;
+    }
     const expires = new Date(data.expiresAt);
     $("issued-link-expiry").textContent = Number.isNaN(expires.getTime()) ?
       "One use only. Ask the server operator if the expiry is unavailable." :
@@ -649,6 +657,19 @@
     if (window.SessionScribeUI.showAdmin()) loadAdmin();
   });
   $("admin-refresh").addEventListener("click", loadAdmin);
+  $("create-open-invitation").addEventListener("click", async () => {
+    text("admin-error", "");
+    try { await issueLink("/api/admin/open-invitations", {}, "Open invitation (any email)"); }
+    catch (error) { text("admin-error", error.message); }
+  });
+  $("revoke-open-invitations").addEventListener("click", async () => {
+    if (!window.confirm("Revoke every unused open invitation? People who already signed up keep their accounts.")) return;
+    text("admin-error", "");
+    try {
+      const result = await json("/api/admin/open-invitations/revoke", "POST", {});
+      text("admin-message", `${result.revoked} unused open invitation${result.revoked === 1 ? "" : "s"} revoked.`);
+    } catch (error) { text("admin-error", error.message); }
+  });
   $("whitelist-form").addEventListener("submit", async event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -788,7 +809,7 @@
       $("invitation-field").hidden = true;
       text("invitation-notice", invitationEmail ?
         `Invitation for ${invitationEmail}. Create a password to accept this one-use invitation.` :
-        "Create a password and enter the invitation's bound email to accept this one-use invitation.");
+        "You've been invited. Enter the email you want to sign in with and create a password to accept this one-use invitation.");
     }
     if (loaded) renderAccount(user);
   }

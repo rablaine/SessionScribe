@@ -40,8 +40,12 @@ The command prompts for a password and confirmation without echoing them. Do not
 
 After signing in as administrator:
 
-1. Add your friend's address to the whitelist.
-2. Generate an invitation for that address and share the one-use link directly with the intended person.
+1. **Don't know their email?** Choose **Create open invitation** in Access management and send them the one-use link
+   (or just the token, which they paste into the sign-up form's **Invitation token** field). They choose their own
+   email and password. Open invitations expire after 72 hours, can't be used to take over an existing account, and
+   **Revoke unused open invitations** cancels any you've handed out but don't want used.
+2. **Know their email?** Add it to the whitelist and generate an invitation bound to that address, then share the
+   one-use link directly with the intended person.
 3. The recipient chooses a password through that invitation; the bound account becomes active immediately.
 4. Without an invitation, signup creates a pending account. It can sign in to see **“Talk to the admin to enable access”**, refresh status, or sign out, but cannot use session APIs.
 5. Approve an ordinary pending request only after confirming the requester is the intended person. Alternatively, send a bound invitation. Admin-issued links avoid an email-delivery service; an email string alone never proves identity.
@@ -292,6 +296,7 @@ Every command runs inside the container as the app user and prints a one-use lin
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin bootstrap-link --email you@example.com"  # first admin (link valid 24 h)
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin reset-link --email you@example.com"      # lost password (1 h)
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin invite --email friend@example.com"       # invitation (72 h)
+az containerapp exec -g <rg> -n session-scribe --command "scribe-admin open-invite"                             # invitation for any email (72 h)
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin delete-user --email someone@example.com" # session-free non-admin
 ```
 

@@ -450,6 +450,18 @@ export class Accounts {
     });
     return { url: `${origin}/#invite=${raw}&email=${encodeURIComponent(email)}`, expiresAt: new Date(expiresAt).toISOString() };
   }
+  // Single-use invitation not bound to an email: the recipient chooses their own email when they sign up.
+  private createOpenInvitation(origin: string, actorId: string | null) {
+    const raw = token(), expiresAt = Date.now() + INVITE_MS;
+    this.transaction(() => {
+      this.run("INSERT INTO links(hash,kind,email,expiresAt) VALUES (?,'invitation','',?)", hash(raw), expiresAt);
+      this.audit("open-invitation.issued", actorId);
+    });
+    return { url: `${origin}/#invite=${raw}`, token: raw, expiresAt: new Date(expiresAt).toISOString() };
+  }
+  operatorOpenInvite(): { url: string; token: string; expiresAt: string } {
+    return this.createOpenInvitation(this.operatorOrigin(), null);
+  }
   operatorResetLink(rawEmail: string, lifetimeMs = RESET_MS): { url: string; expiresAt: string } {
     const email = emailSchema.parse(rawEmail);
     const origin = this.operatorOrigin(), raw = token(), expiresAt = Date.now() + lifetimeMs;
@@ -596,11 +608,19 @@ export class Accounts {
         }
         if (invitationToken) {
           const invitation = this.get<LinkRow>("SELECT * FROM links WHERE hash=? AND kind='invitation'", hash(invitationToken));
-          if (!invitation || invitation.email !== email || invitation.usedAt !== null ||
+          // An open invitation (no bound email) lets the recipient choose their email, but only for a new account:
+          // it must never take over an existing account by setting its password.
+          const open = invitation?.email === "";
+          if (open && existing && invitation.usedAt === null && invitation.expiresAt > Date.now()) {
+            throw new PublicError(400, "This email already has an account. Sign in instead, or use a different email.");
+          }
+          if (!invitation || (!open && invitation.email !== email) || invitation.usedAt !== null ||
             invitation.expiresAt <= Date.now() || (existing && existing.status !== "pending")) {
             throw new PublicError(400, "Invalid or expired invitation.");
           }
-          this.run("UPDATE links SET usedAt=? WHERE hash=? AND usedAt IS NULL", Date.now(), invitation.hash);
+          // Record which email redeemed an open invitation so the audit trail stays meaningful.
+          this.run("UPDATE links SET usedAt=?, email=CASE WHEN email='' THEN ? ELSE email END WHERE hash=? AND usedAt IS NULL",
+            Date.now(), email, invitation.hash);
           if (existing) {
             this.run("UPDATE users SET password=?,status='active',verificationMethod='invitation' WHERE id=?", encoded, existing.id);
             this.run("DELETE FROM sessions WHERE userId=?", existing.id);
@@ -725,6 +745,20 @@ export class Accounts {
         this.audit("invitation.issued", this.userId(req), user?.id ?? null);
       });
       res.json({ url: `${origin}/#invite=${raw}&email=${encodeURIComponent(input.data.email)}`, expiresAt: new Date(expiresAt).toISOString() });
+    });
+    this.router.post("/admin/open-invitations", (req, res) => {
+      if (!z.object({}).strict().safeParse(req.body).success) throw new PublicError(400, "Invalid invitation request.");
+      res.json(this.createOpenInvitation(this.requestOrigin(req), this.userId(req)));
+    });
+    this.router.post("/admin/open-invitations/revoke", (req, res) => {
+      if (!z.object({}).strict().safeParse(req.body).success) throw new PublicError(400, "Invalid request.");
+      const revoked = this.transaction(() => {
+        const result = this.run("UPDATE links SET usedAt=? WHERE kind='invitation' AND email='' AND usedAt IS NULL AND expiresAt>?",
+          Date.now(), Date.now());
+        this.audit("open-invitations.revoked", this.userId(req));
+        return Number(result.changes);
+      });
+      res.json({ revoked });
     });
     this.router.post("/admin/users/:id/reset-link", (req, res) => {
       if (!z.object({}).strict().safeParse(req.body).success) throw new PublicError(400, "Invalid reset request.");
