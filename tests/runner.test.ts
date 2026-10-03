@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, access } from "node:fs/promises";
+import { mkdtemp, rm, access, readFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -9,7 +9,8 @@ import { runTool, inspectRecording } from "../src/audio.js";
 import { config } from "../src/config.js";
 import { createDemo } from "../src/demo.js";
 import { type Job } from "../src/domain.js";
-import { JobRunner } from "../src/runner.js";
+import { JobRunner, recapFraction } from "../src/runner.js";
+import { StageTimings } from "../src/timings.js";
 import { JobStore } from "../src/store.js";
 import type { LaughterDetection } from "../src/laughter.js";
 
@@ -72,8 +73,18 @@ test("worker: actual MP3 mixdown, persisted transcript, recap failure/retry, sav
     ], 10_000);
     assert((await inspectRecording(config.ffprobe, store.audioPath(job.id), job.originalName)) > 0);
     const failedRecapRunner = new JobRunner(store, speech, async () => { throw new Error("Fixture recap failure"); }, noLaughter);
+    failedRecapRunner.timings = StageTimings.inDirectory(root);
     failedRecapRunner.enqueue(job.id);
     await wait(failedRecapRunner, job.id);
+    const failedRun = store.get(job.id)!.progress!;
+    assert.equal(failedRun.kind, "process");
+    assert.equal(failedRun.outcome, "failed");
+    assert.ok(failedRun.finishedAt);
+    assert.deepEqual(failedRun.steps.map(step => `${step.key}:${step.status}`), [
+      "prepare:done", "upload:done", "submit:done", "laughter:done", "transcribe:done", "recap:failed", "cleanup:done"]);
+    assert.ok(failedRun.steps.every(step => step.estimateMs > 0));
+    const timings = JSON.parse(await readFile(path.join(root, "stage-timings.json"), "utf8"));
+    assert.deepEqual(Object.keys(timings).sort(), ["cleanup", "laughter", "prepare", "submit", "transcribe", "upload"]);
     assert.equal(store.get(job.id)!.status, "transcript_ready");
     assert.equal(store.get(job.id)!.segments.length, 8);
     assert.equal(store.get(job.id)!.laughter.status, "completed");
@@ -89,6 +100,10 @@ test("worker: actual MP3 mixdown, persisted transcript, recap failure/retry, sav
     assert.equal(store.get(job.id)!.status, "completed");
     assert.equal(store.get(job.id)!.error, undefined);
     assert.equal(speech.submissions, 1, "recap retry must not retranscribe");
+    const retryRun = store.get(job.id)!.progress!;
+    assert.equal(retryRun.outcome, "completed");
+    assert.deepEqual(retryRun.steps.filter(step => step.status !== "skipped").map(step => `${step.key}:${step.status}`),
+      ["recap:done", "cleanup:done"]);
 
     const resumed = {
       ...createDemo(), demo: false, status: "transcribing" as const, segments: [], recap: undefined,
@@ -246,4 +261,22 @@ test("worker accepts actual stereo Ogg Opus, retains original playback audio, an
     Object.assign(config, originalConfig);
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("recap progress messages map to monotonic sub-progress, and stage timings learn from history", async () => {
+  assert.equal(recapFraction("Reading story scenes 1 of 4"), 0);
+  assert.equal(recapFraction("Reading story scenes 3 of 4"), 0.375);
+  assert.equal(recapFraction("Combining story notes 1 of 2"), 0.75);
+  assert.equal(recapFraction("Writing the chronological session recap"), 0.9);
+  assert.equal(recapFraction("Preparing"), undefined);
+  const timings = new StageTimings();
+  const hour = 60 * 60_000;
+  const guess = await timings.estimate("transcribe", hour);
+  assert.ok(guess > 60_000);
+  for (const minutes of [5, 6, 7]) await timings.record("transcribe", minutes * 60_000, hour);
+  assert.equal(await timings.estimate("transcribe", hour), 6 * 60_000);
+  // Fixed queue overhead (1 min) is not multiplied by recording length.
+  assert.equal(await timings.estimate("transcribe", 2 * hour), 11 * 60_000);
+  await timings.record("submit", 4000, hour);
+  assert.equal(await timings.estimate("submit", 3 * hour), 4000, "fixed-cost stages do not scale with length");
 });

@@ -10,6 +10,7 @@ import { Accounts } from "./accounts.js";
 import { InstanceLock } from "./instance-lock.js";
 import { RetentionSweeper } from "./retention.js";
 import { DailyBackups } from "./backup.js";
+import { StageTimings } from "./timings.js";
 import type { Uploads } from "./uploads.js";
 
 // Listen immediately so the platform sees a live process, but answer 503 until this instance owns DATA_DIR.
@@ -54,6 +55,7 @@ if (existsSync(restoreFile)) {
 const store = new JobStore(config.dataDir);
 await store.init();
 const runner = new JobRunner(store);
+runner.timings = StageTimings.inDirectory(config.dataDir);
 const accounts = new Accounts({
   databasePath,
   publicOrigin: config.publicOrigin || undefined,

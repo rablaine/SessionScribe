@@ -61,6 +61,7 @@
       createdAt: value.createdAt,
       verificationMethod: ["invitation", "manual"].includes(value.verificationMethod) ?
         value.verificationMethod : null,
+      consentAccepted: value.consentAccepted === true,
     });
   }
 
@@ -404,6 +405,8 @@
       const data = await json("/api/auth/register", "POST", {
         email: $("signup-email").value.trim(), password: $("signup-password").value,
         ...(token ? { invitationToken: token } : {}),
+        ...($("signup-consent").checked ? { recordingConsent: true } : {}),
+        ...($("signup-consent").checked ? { recordingConsent: true } : {}),
       });
       if (submittedIntent === intentVersion) {
         invitationToken = "";

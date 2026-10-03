@@ -117,7 +117,8 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       res.attachment(clipFilename(job.title || "recording", job.id).replace(/\.mp3$/, extension));
     }
     res.sendFile(path.resolve(store.audioPath(job.id)), { acceptRanges: true, cacheControl: false }, error => {
-      if (error) next(error);
+      // Players routinely cancel range requests while seeking; that is not a server error.
+      if (error && !(error.message === "Request aborted" || "code" in error && error.code === "ECONNABORTED")) next(error);
     });
   });
   app.get("/api/jobs/:id/clips", (req, res) => {

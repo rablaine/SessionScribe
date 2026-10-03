@@ -23,7 +23,8 @@ const startSchema = z.object({
   locale: z.string().regex(/^[a-z]{2,3}-[A-Z]{2}$/).default("en-US"),
   maxSpeakers: z.coerce.number().int().min(2).max(35).default(8),
   context: z.string().max(6000).default(""),
-  consent: z.literal(true),
+  // One-time acknowledgement: only needed (and then recorded) if the account has not accepted it yet.
+  consent: z.literal(true).optional(),
   filename: z.string().trim().min(1).max(255),
   size: z.number().int().positive().max(MAX_UPLOAD_BYTES),
 }).strict();
@@ -106,10 +107,14 @@ export class Uploads {
       const missing = readiness().transcriptionMissing;
       if (missing.length) throw new UploadError(503, `Configure ${missing.join(", ")} before uploading.`);
       const parsed = startSchema.safeParse(req.body);
-      if (!parsed.success) throw new UploadError(400, "Invalid upload fields. Check title, language, speaker count, file size, and recording consent.");
+      if (!parsed.success) throw new UploadError(400, "Invalid upload fields. Check the title, language, speaker count and file size.");
       const input = parsed.data;
       if (!recordingFormat(input.filename)) throw new UploadError(400, "Only MP3 and Ogg Opus (.opus or .ogg) uploads are supported.");
       const ownerId = this.accounts.userId(req);
+      if (!this.accounts.hasConsent(ownerId)) {
+        if (!input.consent) throw new UploadError(403, "Confirm that everyone recorded has agreed to recording and Azure processing before importing.");
+        this.accounts.recordConsent(ownerId);
+      }
       const state = await this.admit(async () => {
         await this.cleanup();
         const active = await this.active();

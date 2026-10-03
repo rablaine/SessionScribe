@@ -256,6 +256,7 @@ function renderJob(job) {
   workspace.setRecordingState(job);
   $("session-meta").textContent = `${job.demo ? "FICTIONAL DEMO \u00b7 " : ""}${job.locale} \u00b7 ${job.durationMs ? time(job.durationMs) : "DURATION PENDING"}`;
   $("stage").textContent = job.stage;
+  window.SessionScribeProgress?.render(job);
   const processing = activeStatuses.has(job.status) || activeLaughterStatuses.has(job.laughter.status);
   $("status-dot").className = `status-dot${processing ? " busy" : job.status === "failed" ? " failed" : ""}`;
   $("delete-button").disabled = processing || deletingSession;
@@ -713,7 +714,7 @@ $("upload-form").addEventListener("submit", async event => {
       locale: String(fields.get("locale") || "en-US"),
       maxSpeakers: Number(fields.get("maxSpeakers") || 8),
       context: String(fields.get("context") || ""),
-      consent: fields.get("consent") === "true",
+      ...(fields.get("consent") === "true" ? { consent: true } : {}),
     });    await selectJob(job.id);
     activateTab("transcript");
     workspace.closeImport();
@@ -727,6 +728,7 @@ $("upload-form").addEventListener("submit", async event => {
   finally {
     busy = false;
     workspace.setImportBusy(false);
+    if (!accounts.getUser()?.consentAccepted) await accounts.refresh({ background: true }).catch(() => {});
     await loadConfiguration();
   }
 });
@@ -816,7 +818,16 @@ $("delete-dialog").addEventListener("close", async () => {
   }
 });
 
+// Recording consent is acknowledged once per account (at sign-up or on the first import), not per upload.
+function syncImportConsent() {
+  const needed = !accounts.getUser()?.consentAccepted;
+  $("import-consent").hidden = !needed;
+  $("import-consent-check").required = needed;
+  $("consent-reminder").hidden = needed;
+}
+
 async function loadConfiguration() {
+  syncImportConsent();
   try {
     const configuration = await api("/api/config");
     $("upload-button").disabled = busy || configuration.transcriptionMissing.length > 0;
@@ -884,6 +895,7 @@ accounts.onChange(user => {
   $("session-title").textContent = "";
   $("session-meta").textContent = "";
   $("stage").textContent = "";
+  window.SessionScribeProgress?.render(null);
   for (const id of ["session-list", "transcript-lines", "recap-content", "speaker-fields", "warnings"]) {
     $(id).replaceChildren();
   }

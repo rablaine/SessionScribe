@@ -17,6 +17,14 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
 - Jobs/transcripts persist as JSON under `DATA_DIR`. On restart, in-progress jobs resume; saved Azure job URLs are polled rather than resubmitted. An instance lock guarantees that only one process uses `DATA_DIR`; during a rolling deploy the new container waits for the old one to release it.
 - Uploads are sent in resumable 8 MiB chunks (`/api/uploads`), so no request runs long enough to hit proxy timeouts and a dropped connection resumes from the last confirmed byte. Recordings are checked with ffprobe before a session is created; invalid files are deleted immediately.
 - Transcripts survive recap failures. Recaps can be retried independently.
+- **Progress for long-running work.** Processing, recap regeneration and laughter re-runs show a checklist of steps
+  (completed with durations, the current one, and what's next) and an estimated progress bar with time remaining.
+  Estimates come from `DATA_DIR/stage-timings.json`, which learns each stage's fixed overhead and per-audio-minute
+  cost from recent runs. The server also logs every stage's duration. Completed steps are real; the current step's
+  fill is an estimate (recap writing reports real chunk progress).
+- **Recording consent is acknowledged once per account**, at invitation sign-up or on the first import, and stored
+  server-side (`users.consentVersion`). Uploads are refused until it has been given. Bumping `CONSENT_VERSION` in
+  `src/accounts.ts` asks everyone once more.
 - Fictional demo works without credentials and makes **no Azure calls**.
 - Consent required for real uploads; private temporary Azure blobs, SP/MSI authentication, Speech managed-identity reads, audio cleanup, explicit deletion, and cleanup warnings.
 

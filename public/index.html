@@ -11,7 +11,8 @@
   <script src="/accounts.js" defer></script>
   <script src="/clip-timeline.js" defer></script>
   <script src="/clips.js" defer></script>
-  <script src="/app.js" defer></script>
+  <script src="/progress.js" defer></script>
+<script src="/app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to workspace</a>
@@ -56,7 +57,7 @@
           <section id="signup-panel" class="auth-panel" role="tabpanel" aria-labelledby="signup-tab" hidden>
             <p id="invitation-notice" class="notice" hidden></p>
             <p id="signup-hint" class="hint">Anyone may request an account. Ordinary signups stay pending until the administrator personally confirms identity and approves access. A valid invitation activates only its bound, whitelisted email.</p>
-            <form id="signup-form"><div id="signup-error" class="error" role="alert" hidden></div><label for="signup-email">Email<input id="signup-email" name="email" type="email" autocomplete="username" required maxlength="254"></label><label for="signup-password">Create a password<input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required aria-describedby="signup-password-help"></label><p id="signup-password-help" class="hint">Use a unique password with 8–128 characters. No special-character or composition rules are required.</p><label id="invitation-field" for="signup-invitation">Invitation token <span class="optional">optional</span><input id="signup-invitation" type="password" autocomplete="off" placeholder="Paste the token the administrator gave you"></label><button id="signup-submit" class="primary" type="submit">Create account / request access</button></form>
+            <form id="signup-form"><div id="signup-error" class="error" role="alert" hidden></div><label for="signup-email">Email<input id="signup-email" name="email" type="email" autocomplete="username" required maxlength="254"></label><label for="signup-password">Create a password<input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required aria-describedby="signup-password-help"></label><p id="signup-password-help" class="hint">Use a unique password with 8–128 characters. No special-character or composition rules are required.</p><label id="invitation-field" for="signup-invitation">Invitation token <span class="optional">optional</span><input id="signup-invitation" type="password" autocomplete="off" placeholder="Paste the token the administrator gave you"></label><label class="consent"><input id="signup-consent" type="checkbox" required><span>I will only upload recordings when everyone recorded has agreed to being recorded and to processing by Azure AI services.</span></label><button id="signup-submit" class="primary" type="submit">Create account / request access</button></form>
           </section>
           <section id="reset-panel" class="auth-panel" aria-labelledby="reset-heading" hidden>
             <h2 id="reset-heading">Choose a new password</h2><p class="hint">This one-use link resets your password. You will sign in afterwards; no automatic session is created.</p>
@@ -106,6 +107,13 @@
             <button id="delete-button" class="quiet danger" type="button">Delete session</button>
           </header>
           <div class="processing" role="status"><span id="status-dot" class="status-dot" aria-hidden="true"></span><span id="stage"></span></div>
+          <section id="run-progress" class="run-progress" aria-label="Processing progress" hidden>
+            <details id="run-progress-details">
+              <summary><strong id="run-progress-title"></strong> <span id="run-progress-eta" class="hint"></span></summary>
+              <ol id="run-progress-steps" class="progress-steps"></ol>
+            </details>
+            <div id="run-progress-track" class="progress-track" role="progressbar" aria-label="Estimated progress" aria-valuemin="0" aria-valuemax="100"><div id="run-progress-fill" class="progress-fill"></div></div>
+          </section>
           <div id="job-error" class="error" role="alert" hidden></div>
           <div id="warnings" class="warnings" role="status" hidden></div>
           <div class="review-layout">
@@ -167,7 +175,8 @@
       </div>
       <label for="import-context">Campaign context <span class="optional">optional</span><textarea id="import-context" name="context" maxlength="6000" rows="3" placeholder="Character names, locations, spelling hints..."></textarea></label>
       <p class="hint">Context guides recap spelling only; it does not improve speech recognition or prove an event happened.</p>
-      <label class="consent"><input name="consent" type="checkbox" value="true" required><span>Everyone recorded has agreed to recording and Azure processing.</span></label>
+      <label id="import-consent" class="consent" hidden><input id="import-consent-check" name="consent" type="checkbox" value="true"><span>I will only upload recordings when everyone recorded has agreed to being recorded and to processing by Azure AI services. <em>(asked once)</em></span></label>
+      <p id="consent-reminder" class="hint">Only upload sessions where everyone recorded agreed to recording and Azure processing.</p>
       <p id="retention-notice" class="hint"></p><p id="upload-help" class="hint" role="status">Azure processing is billable. Multi-hour batch jobs can take minutes to hours.</p>
       <p class="hint">Cancel closes this dialog without clearing your chosen file or entered details.</p>
       <div class="dialog-actions"><button class="secondary" type="button" data-close-import>Cancel</button><button id="upload-button" class="primary" type="submit">Transcribe session <span aria-hidden="true">→</span></button></div>

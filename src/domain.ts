@@ -78,6 +78,30 @@ export const recapSchema = z.union([narrativeRecapSchema, legacyRecapSchema]).tr
 export type Recap = z.infer<typeof recapSchema>;
 export const recapKeys = ["paragraphs", "uncertainties"] as const;
 
+export const progressStepKeys = ["prepare", "upload", "submit", "laughter", "transcribe", "recap", "cleanup"] as const;
+export type ProgressStepKey = typeof progressStepKeys[number];
+export const progressStepSchema = z.object({
+  key: z.enum(progressStepKeys),
+  label: z.string(),
+  status: z.enum(["pending", "running", "done", "failed", "skipped"]),
+  startedAt: z.string().optional(),
+  endedAt: z.string().optional(),
+  // Planned duration from learned stage timings; the browser animates an estimated bar from it.
+  estimateMs: z.number().nonnegative(),
+  detail: z.string().max(200).optional(),
+  // Real sub-progress when a stage can report it (e.g. recap chunks); otherwise time-based.
+  fraction: z.number().min(0).max(1).optional(),
+});
+export type ProgressStep = z.infer<typeof progressStepSchema>;
+export const progressSchema = z.object({
+  kind: z.enum(["process", "recap", "laughter"]),
+  startedAt: z.string(),
+  finishedAt: z.string().optional(),
+  outcome: z.enum(["completed", "failed"]).optional(),
+  steps: z.array(progressStepSchema).max(10),
+});
+export type Progress = z.infer<typeof progressSchema>;
+
 export const jobSchema = z.object({
   id: z.uuid(),
   title: z.string(),
@@ -107,6 +131,8 @@ export const jobSchema = z.object({
   recordingPurgedAt: z.string().optional(),
   // Persisted so a restart resumes a queued recap as recap-only work, never as a fresh transcription.
   queuedOperation: z.enum(["process", "recap"]).optional(),
+  // Step history of the latest processing run, for progress display.
+  progress: progressSchema.optional(),
 });
 export type Job = z.infer<typeof jobSchema>;
 

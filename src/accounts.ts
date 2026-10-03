@@ -12,7 +12,12 @@ export interface AccountUser {
   status: "pending" | "active" | "rejected" | "suspended";
   createdAt: string;
   verificationMethod: "invitation" | "manual" | null;
+  // Whether the user has acknowledged the current recording-consent statement (asked once, not per upload).
+  consentAccepted: boolean;
 }
+
+// Bump when the consent wording changes materially; everyone is asked once more.
+export const CONSENT_VERSION = 1;
 
 export interface AccountsOptions {
   databasePath: string;
@@ -35,7 +40,7 @@ export interface AudioClip {
   createdAt: string;
 }
 
-type UserRow = AccountUser & { password: string };
+type UserRow = Omit<AccountUser, "consentAccepted"> & { password: string; consentVersion?: number | null };
 type Session = { hash: string; csrf: string; user: AccountUser };
 type LinkRow = { hash: string; email: string; userId: string | null; expiresAt: number; usedAt: number | null };
 const LEGACY_COOKIE = "scribe_session";
@@ -51,12 +56,13 @@ const emailSchema = z.string().trim().toLowerCase().max(254).email();
 const passwordSchema = z.string().min(8).max(128);
 const tokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const credentialsSchema = z.object({ email: emailSchema, password: passwordSchema }).strict();
-const signupSchema = credentialsSchema.extend({ invitationToken: tokenSchema.optional() });
+const signupSchema = credentialsSchema.extend({ invitationToken: tokenSchema.optional(), recordingConsent: z.literal(true).optional() });
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const token = () => randomBytes(32).toString("base64url");
 const safe = (row: UserRow | AccountUser): AccountUser => ({
   id: row.id, email: row.email, role: row.role, status: row.status,
   createdAt: row.createdAt, verificationMethod: row.verificationMethod,
+  consentAccepted: "consentAccepted" in row ? row.consentAccepted : Number(row.consentVersion ?? 0) >= CONSENT_VERSION,
 });
 
 class PublicError extends Error {
@@ -159,7 +165,7 @@ export class Accounts {
     this.db = new DatabaseSync(options.databasePath);
     this.db.exec(`PRAGMA journal_mode=${options.journalMode ?? "WAL"}; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;`);
     const version = (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    if (version > 5) { this.db.close(); throw new Error("Unsupported accounts database version."); }
+    if (version > 6) { this.db.close(); throw new Error("Unsupported accounts database version."); }
     if (version === 0) this.db.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE users (
@@ -230,6 +236,13 @@ export class Accounts {
       PRAGMA user_version=5;
       COMMIT;
     `);
+    if (version < 6) {
+      const columns = (this.db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map(column => column.name);
+      this.db.exec("BEGIN IMMEDIATE");
+      if (!columns.includes("consentVersion")) this.db.exec("ALTER TABLE users ADD COLUMN consentVersion INTEGER");
+      if (!columns.includes("consentAt")) this.db.exec("ALTER TABLE users ADD COLUMN consentAt TEXT");
+      this.db.exec("PRAGMA user_version=6; COMMIT;");
+    }
     this.routes();
   }
 
@@ -417,6 +430,17 @@ export class Accounts {
   }
   close(): void { this.db.close(); }
 
+  hasConsent(userId: string): boolean {
+    return Number(this.get<{ consentVersion: number | null }>("SELECT consentVersion FROM users WHERE id=?", userId)?.consentVersion ?? 0) >= CONSENT_VERSION;
+  }
+  recordConsent(userId: string): void {
+    if (this.hasConsent(userId)) return;
+    this.transaction(() => {
+      this.run("UPDATE users SET consentVersion=?, consentAt=? WHERE id=?", CONSENT_VERSION, new Date().toISOString(), userId);
+      this.audit("user.recording-consent", userId, userId);
+    });
+  }
+
   // Consistent online copy for backups; works in WAL and rollback-journal modes.
   backupTo(file: string): void {
     this.db.prepare("VACUUM INTO ?").run(file);
@@ -515,7 +539,7 @@ export class Accounts {
       if (this.emailUser(email)) throw new Error("This email is already registered. Choose an unused administrator email.");
       const user: AccountUser = {
         id: randomUUID(), email, role: "admin", status: "active",
-        createdAt: new Date().toISOString(), verificationMethod: "manual",
+        createdAt: new Date().toISOString(), verificationMethod: "manual", consentAccepted: false,
       };
       this.insertUser(user, encoded);
       this.audit("admin.bootstrap", user.id, user.id);
@@ -586,7 +610,7 @@ export class Accounts {
         this.recordLoginFailure(req, email);
         throw new PublicError(401, GENERIC_LOGIN);
       }
-      const session = this.issueSession(req, res, current);
+      const session = this.issueSession(req, res, safe(current));
       if (!this.knownDevice(req, current.id)) this.rememberDevice(res, current.id);
       res.json(session);
     });
@@ -598,7 +622,7 @@ export class Accounts {
       }
       this.rate(req, "register", parsed.success && !invited ? parsed.data.email : undefined);
       if (!parsed.success) throw new PublicError(400, "Invalid registration details.");
-      const { email, password, invitationToken } = parsed.data;
+      const { email, password, invitationToken, recordingConsent } = parsed.data;
       const encoded = await passwordHash(password);
       const user = this.transaction(() => {
         const existing = this.emailUser(email);
@@ -625,6 +649,7 @@ export class Accounts {
             this.run("UPDATE users SET password=?,status='active',verificationMethod='invitation' WHERE id=?", encoded, existing.id);
             this.run("DELETE FROM sessions WHERE userId=?", existing.id);
             this.audit("user.invitation-accepted", existing.id, existing.id);
+            if (recordingConsent) this.run("UPDATE users SET consentVersion=?, consentAt=? WHERE id=?", CONSENT_VERSION, new Date().toISOString(), existing.id);
             return safe(this.user(existing.id)!);
           }
         } else if (existing) {
@@ -638,8 +663,10 @@ export class Accounts {
         const created: AccountUser = {
           id: randomUUID(), email, role: "user", status: invitationToken ? "active" : "pending",
           createdAt: new Date().toISOString(), verificationMethod: invitationToken ? "invitation" : null,
+          consentAccepted: !!recordingConsent,
         };
         this.insertUser(created, encoded);
+        if (recordingConsent) this.run("UPDATE users SET consentVersion=?, consentAt=? WHERE id=?", CONSENT_VERSION, new Date().toISOString(), created.id);
         this.audit(invitationToken ? "user.invitation-accepted" : "user.registered", created.id, created.id);
         return created;
       });

@@ -226,3 +226,39 @@ test("parallel upload starts by one user admit exactly one; recap-only work neve
     await f.close();
   }
 });
+test("recording consent is asked once per account: at sign-up or on the first import, then never again", async () => {
+  const originalConfig = { ...config };
+  Object.assign(config, {
+    speechEndpoint: "https://fixture.cognitiveservices.azure.com",
+    storageAccountUrl: "https://fixture.blob.core.windows.net", authMode: "azure-cli",
+  });
+  const f = await createSessionFixture("dnd-consent-test-");
+  try {
+    const start = (consent?: boolean) => f.request(`${f.base}/api/uploads`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Consent", filename: "c.mp3", size: 100, ...(consent ? { consent: true } : {}) }),
+    });
+    const session = async () => (await (await f.request(`${f.base}/api/auth/session`)).json()).user;
+    assert.equal((await session()).consentAccepted, false);
+    const refused = await start();
+    assert.equal(refused.status, 403);
+    assert.match((await refused.json()).error, /agreed to recording/);
+    const first = await start(true);
+    assert.equal(first.status, 201);
+    assert.equal((await session()).consentAccepted, true);
+    await f.request(`${f.base}/api/uploads/${(await first.json()).id}`, { method: "DELETE" });
+    assert.equal((await start()).status, 201, "no per-upload consent after the one-time acknowledgement");
+
+    const invite = await (await f.request(`${f.base}/api/admin/open-invitations`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    })).json();
+    const joined = await fetch(`${f.base}/api/auth/register`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "player@example.test", password: "a-long-password-1", invitationToken: invite.token, recordingConsent: true }),
+    });
+    assert.equal((await joined.json()).user.consentAccepted, true);
+  } finally {
+    Object.assign(config, originalConfig);
+    await f.close();
+  }
+});

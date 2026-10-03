@@ -436,3 +436,21 @@ td .sample-label { margin-left: 4px; }
 }
 .recording-state.expiring { color: var(--cp-danger); }
 #recording-download { margin-top: 4px; }
+.run-progress { margin: -4px 0 20px; padding: 12px 16px; border: 1px solid var(--cp-border); border-radius: .625rem; background: var(--cp-bg-elevated); }
+.run-progress summary { cursor: pointer; font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.run-progress summary .hint { margin: 0; }
+.progress-track { margin-top: 10px; height: 10px; border-radius: 999px; background: var(--cp-surface-soft); overflow: hidden; }
+.progress-fill { height: 100%; width: 0; border-radius: inherit; background-color: var(--cp-accent); transition: width .9s ease;
+  background-image: repeating-linear-gradient(-45deg, rgba(255,255,255,.28) 0 8px, transparent 8px 16px); background-size: 22.6px 22.6px; animation: barber-pole 1s linear infinite; }
+@keyframes barber-pole { to { background-position: 22.6px 0; } }
+.progress-steps { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.progress-step { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px; align-items: baseline; color: var(--cp-text-muted); }
+.progress-step.done, .progress-step.running { color: var(--cp-text); }
+.progress-step.done .progress-step-icon { color: var(--cp-success); }
+.progress-step.running .progress-step-icon { color: var(--cp-accent); animation: pulse 1.5s infinite; }
+.progress-step.failed .progress-step-icon, .progress-step.failed .progress-step-meta { color: var(--cp-danger); }
+.progress-step-meta { font-variant-numeric: tabular-nums; color: var(--cp-text-muted); text-align: right; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .progress-fill { animation: none; transition: none; } .progress-step.running .progress-step-icon { animation: none; } }.run-progress summary::after { content: "Show steps \25BE"; margin-left: auto; font-size: 12px; color: var(--cp-text-muted); }
+.run-progress details[open] summary::after { content: "Hide steps \25B4"; }
+.run-progress summary::-webkit-details-marker { display: none; }
