@@ -106,6 +106,38 @@ foreach ($a in $assignments) {
     }
 }
 
+Write-Host "Recap content filter (fantasy violence): block only high-severity violence on the recap deployment"
+# D&D combat narration routinely rates "medium" violence, which the default filter blocks. This policy keeps every
+# other category at the default and applies only to this app's recap deployment. No approval is needed to raise a
+# threshold; only turning filters off requires one.
+$policyName = "session-scribe-fantasy-violence"
+$filters = @()
+foreach ($source in @("Prompt", "Completion")) {
+    $filters += @{ name = "Violence"; blocking = $true; enabled = $true; severityThreshold = "High"; source = $source }
+    foreach ($category in @("Hate", "Sexual", "Selfharm")) {
+        $filters += @{ name = $category; blocking = $true; enabled = $true; severityThreshold = "Medium"; source = $source }
+    }
+}
+$filters += @{ name = "Jailbreak"; blocking = $true; enabled = $true; source = "Prompt" }
+$filters += @{ name = "Protected Material Text"; blocking = $true; enabled = $true; source = "Completion" }
+$filters += @{ name = "Protected Material Code"; blocking = $false; enabled = $true; source = "Completion" }
+$policyBody = Join-Path ([IO.Path]::GetTempPath()) "rai-$([guid]::NewGuid()).json"
+try {
+    @{ properties = @{ mode = "Blocking"; basePolicyName = "Microsoft.DefaultV2"; contentFilters = $filters } } |
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $policyBody -Encoding utf8
+    AzRun rest --method put --url "https://management.azure.com$aiId/raiPolicies/$($policyName)?api-version=2024-10-01" --body "@$policyBody" -o none
+    $deploymentUrl = "https://management.azure.com$aiId/deployments/$($ai.openaiDeployment)?api-version=2024-10-01"
+    $deployment = AzRun rest --method get --url $deploymentUrl -o json | Out-String | ConvertFrom-Json
+    if ($deployment.properties.raiPolicyName -ne $policyName) {
+        $update = @{ sku = $deployment.sku; properties = @{
+            model = $deployment.properties.model; raiPolicyName = $policyName
+            versionUpgradeOption = $deployment.properties.versionUpgradeOption
+        } }
+        $update | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $policyBody -Encoding utf8
+        AzRun rest --method put --url $deploymentUrl --body "@$policyBody" -o none
+    }
+} finally { Remove-Item -LiteralPath $policyBody -ErrorAction SilentlyContinue }
+
 Write-Host "Container Apps environment (Consumption, no VNet: no load balancer or private endpoint charges)"
 if (-not (AzExists containerapp env show --subscription $sub -g $rg -n $names.env)) {
     $workspaceId = AzRun monitor log-analytics workspace show --subscription $sub -g $rg -n $names.logs --query customerId -o tsv
@@ -152,5 +184,6 @@ if ($st.PSObject.Properties.Name -contains "budgetMonthlyUsd" -and $st.budgetMon
 
 Write-Host ""
 Write-Host "Provisioning complete."
-Write-Host "Default app URL after first deploy: https://$($cfg.app.name).$domain"
+$customDomain = if ($cfg.app.PSObject.Properties.Name -contains "customDomain" -and $cfg.app.customDomain) { $cfg.app.customDomain } else { "$($cfg.app.name).$domain" }
+Write-Host "App URL after deploy: https://$customDomain"
 Write-Host "Next: .\infra\deploy.ps1"

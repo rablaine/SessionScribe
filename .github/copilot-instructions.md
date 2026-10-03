@@ -73,6 +73,8 @@ Invariants:
 - `TRUST_PROXY=1`. Container Apps ingress appends the real client IP as the **last** `X-Forwarded-For` entry,
   verified in production with `LOG_FORWARDING=true`. Other values resolve to the ingress pod, not the client.
 - Speech/OpenAI use the user-assigned managed identity (`AZURE_AUTH_MODE=managed-identity`).
+- The recap deployment uses the custom content filter `session-scribe-fantasy-violence` (violence blocked only at High;
+  everything else default), created by `provision.ps1`. Don't loosen other categories or disable filters.
 - `AZURE_STORAGE_ACCOUNT_KEY` (a Container Apps secret, `secretRef`) is used to upload temporary audio and to
   sign a **48-hour, read-only, HTTPS-only, single-blob SAS** that Speech reads (Speech cannot authenticate into
   the other tenant). The SAS is never persisted or sent to browsers. Never commit or print the key.
