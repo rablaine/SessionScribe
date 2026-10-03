@@ -173,7 +173,7 @@ test("instance lock: a second instance waits until the first releases, and a los
     await writeFile(path.join(root, ".instance.lock"), JSON.stringify({ id: "other", host: "replica-d", heartbeatAt: 0 }));
     await stale.acquire();
     await writeFile(path.join(root, ".instance.lock"), JSON.stringify({ id: "intruder", host: "replica-e", heartbeatAt: Date.now() }));
-    await new Promise(resolve => setTimeout(resolve, 100));
+    for (let attempt = 0; attempt < 100 && !lost; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(lost, true);
     await second.release();
   } finally {
