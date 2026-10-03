@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { config } from "./config.js";
-import { requestJson } from "./http.js";
-import { displaySpeaker, transcriptCharacters, type Job, type Recap } from "./domain.js";
+import { AzureHttpError, requestJson } from "./http.js";
+import { displaySpeaker, timestamp, transcriptCharacters, type Job, type Recap } from "./domain.js";
 import { cognitiveHeaders } from "./auth.js";
 
 const MAX_SOURCE_CHARS = 18_000;
@@ -30,8 +30,26 @@ const responseSchema = z.object({
   choices: z.array(z.object({
     finish_reason: z.string(),
     message: z.object({ content: z.string().nullable(), refusal: z.string().nullable().optional() }),
+    content_filter_results: z.record(z.string(), z.unknown()).optional(),
   })).min(1),
 });
+
+// A model call that did not produce usable output, with the reason so the recap can recover or explain it.
+export class RecapModelError extends Error {
+  constructor(readonly reason: "content_filter" | "length" | "refusal" | "empty", readonly categories: string[] = []) {
+    super(reason === "content_filter"
+      ? `Azure's content filter blocked part of the recap${categories.length ? ` (${categories.join(", ")})` : ""}.`
+      : reason === "length" ? "The recap model ran out of output space even after a retry."
+      : reason === "refusal" ? "The recap model declined to summarize part of this session."
+      : "The recap model returned an empty response.");
+  }
+}
+
+function filteredCategories(results: Record<string, unknown> | undefined): string[] {
+  return Object.entries(results ?? {})
+    .filter(([, value]) => typeof value === "object" && value !== null && (value as { filtered?: unknown }).filtered === true)
+    .map(([name, value]) => `${name}${typeof (value as { severity?: unknown }).severity === "string" ? `: ${(value as { severity: string }).severity}` : ""}`);
+}
 
 export function splitSources(lines: string[], budget = MAX_SOURCE_CHARS): string[] {
   const chunks: string[] = [];
@@ -105,9 +123,13 @@ export async function callAzure(
   headers = cognitiveHeaders,
 ): Promise<Recap> {
   let validationFailure = "";
+  let maxTokens = config.openaiMaxCompletionTokens;
+  const where = phase.final ? "final writing" : phase.level > 0 ? `consolidation level ${phase.level}` : "scene extraction";
   for (let attempt = 0; attempt < MAX_MODEL_ATTEMPTS; attempt++) {
     const task = phase.final ? finalInstructions : phase.level > 0 ? consolidationInstructions : extractionInstructions;
-    const raw = responseSchema.parse(await requestJson(`${config.openaiEndpoint}/openai/v1/chat/completions`, {
+    let response: unknown;
+    try {
+      response = await requestJson(`${config.openaiEndpoint}/openai/v1/chat/completions`, {
       method: "POST",
       headers: { ...await headers(), "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -125,13 +147,31 @@ export async function callAzure(
           type: "json_schema",
           json_schema: { name: "session_recap", strict: true, schema: recapJsonSchema(phase) },
         },
-        max_completion_tokens: config.openaiMaxCompletionTokens,
+        max_completion_tokens: maxTokens,
         ...(config.openaiReasoningEffort ? { reasoning_effort: config.openaiReasoningEffort } : {}),
       }),
-    }));
-    const choice = raw.choices[0]!;
+      });
+    } catch (error) {
+      // Input-side content filtering is reported as an HTTP 400 with code "content_filter".
+      if (error instanceof AzureHttpError && error.code === "content_filter") {
+        console.warn(`Recap ${where}: Azure content filter rejected the input.`);
+        throw new RecapModelError("content_filter", ["input"]);
+      }
+      throw error;
+    }
+    const choice = responseSchema.parse(response).choices[0]!;
     if (choice.finish_reason !== "stop" || choice.message.refusal || !choice.message.content) {
-      throw new Error("Recap model refused, truncated, or did not complete its response. Check the deployment and retry.");
+      const categories = filteredCategories(choice.content_filter_results);
+      console.warn(`Recap ${where}: model stopped with finish_reason=${choice.finish_reason}` +
+        `${choice.message.refusal ? " (refusal)" : ""}${categories.length ? `; filtered: ${categories.join(", ")}` : ""} (attempt ${attempt + 1}).`);
+      if (choice.finish_reason === "content_filter") throw new RecapModelError("content_filter", categories);
+      if (choice.message.refusal) throw new RecapModelError("refusal");
+      if (choice.finish_reason === "length" && attempt + 1 < MAX_MODEL_ATTEMPTS) {
+        // Reasoning tokens count against the allowance; give the retry more room.
+        maxTokens = Math.min(64_000, maxTokens * 2);
+        continue;
+      }
+      throw new RecapModelError(choice.finish_reason === "length" ? "length" : "empty");
     }
     try {
       const parsed = z.object({
@@ -185,12 +225,24 @@ export async function generateRecap(
   const sources = splitSources(lines);
   const scenes: Recap["scenes"] = [];
   const extracted: Recap[] = [];
+  const skipped: string[] = [];
   let segmentOffset = 0;
   for (const [index, source] of sources.entries()) {
     await onProgress(`Reading story scenes ${index + 1} of ${sources.length}`);
-    const result = await call(source, job.context, { final: false, level: 0, sessionTitle: job.title });
     const chunk = segments.slice(segmentOffset, segmentOffset + source.split("\n").length);
     segmentOffset += chunk.length;
+    let result: Recap;
+    try {
+      result = await call(source, job.context, { final: false, level: 0, sessionTitle: job.title });
+    } catch (error) {
+      // One blocked slice of a long session should not sink the whole recap: note the gap and continue.
+      if (!(error instanceof RecapModelError) || (error.reason !== "content_filter" && error.reason !== "refusal")) throw error;
+      const range = `${timestamp(chunk[0]!.startMs)}\u2013${timestamp(Math.max(...chunk.map(segment => segment.endMs)))}`;
+      skipped.push(error.reason === "content_filter"
+        ? `The part of the session from ${range} isn't included: Azure's content filter flagged it${error.categories.length ? ` (${error.categories.join(", ")})` : ""}.`
+        : `The part of the session from ${range} isn't included: the model declined to summarize it.`);
+      continue;
+    }
     if (result.paragraphs.length || result.uncertainties.length) extracted.push(result);
     if (result.paragraphs.length) {
       scenes.push({
@@ -202,15 +254,20 @@ export async function generateRecap(
   }
   let notes = noteLines(extracted);
   if (!extracted.some(recap => recap.paragraphs.length)) {
-    throw new Error("No in-world story was found in this transcript. The transcript is preserved.");
+    throw new Error(skipped.length && skipped.length === sources.length
+      ? "Azure's content filter blocked every part of this transcript, so no recap could be written. The transcript is preserved."
+      : "No in-world story was found in this transcript. The transcript is preserved.");
   }
+  const withGaps = (recap: Recap): Recap => skipped.length
+    ? { ...recap, uncertainties: [...recap.uncertainties, ...skipped.map(text => ({ text, segmentIds: [] }))].slice(0, 30) }
+    : recap;
   for (let level = 1; level <= 6; level++) {
     const bundles = splitSources(notes, MAX_WRITING_SOURCE_CHARS);
     if (bundles.length === 1) {
       await onProgress("Writing the chronological session recap");
       const recap = await call(bundles[0]!, job.context, { final: true, level, sessionTitle: job.title });
       if (!recap.paragraphs.length) throw new Error("Final recap returned no narrative.");
-      return { ...recap, scenes };
+      return withGaps({ ...recap, scenes });
     }
     const condensed: Recap[] = [];
     for (const [index, source] of bundles.entries()) {

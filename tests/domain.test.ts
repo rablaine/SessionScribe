@@ -240,3 +240,22 @@ test("large scene notes consolidate in order while retaining the original naviga
   assert.match(result.paragraphs[0]!.text, /SCENE1, SCENE2, SCENE3/);
   assert.deepEqual(result.scenes.map(scene => scene.startMs), [0, 90000, 180000]);
 });
+
+test("a slice blocked by the content filter is skipped and noted, instead of failing the whole recap", async () => {
+  const { RecapModelError } = await import("../src/recap.js");
+  const job = createDemo();
+  job.segments = Array.from({ length: 3 }, (_, index) => ({
+    id: `S${index + 1}`, speaker: "unknown", startMs: index * 3_600_000, endMs: index * 3_600_000 + 60_000,
+    text: `PART${index + 1} ${"story ".repeat(2500)}`,
+  }));
+  const recap = await generateRecap(job, async () => {}, async (source, _context, phase) => {
+    if (!phase.final && source.includes("PART2")) throw new RecapModelError("content_filter", ["violence: medium"]);
+    return { title: "Recap", paragraphs: [{ text: [...new Set(source.match(/PART\d/g))].join(", ") || "notes", segmentIds: [] }],
+      uncertainties: [], scenes: [] };
+  });
+  assert.equal(recap.scenes.length, 2);
+  assert.match(recap.uncertainties.at(-1)!.text, /01:00:00.01:01:00 isn't included: Azure's content filter flagged it \(violence: medium\)/);
+  await assert.rejects(generateRecap(job, async () => {}, async () => { throw new RecapModelError("content_filter"); }),
+    /blocked every part of this transcript/);
+  await assert.rejects(generateRecap(job, async () => {}, async () => { throw new RecapModelError("length"); }), /ran out of output space/);
+});

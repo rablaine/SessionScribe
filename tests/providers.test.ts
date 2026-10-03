@@ -156,15 +156,29 @@ test("recap stops after two malformed responses and does not retry refusals or t
     };
     await assert.rejects(callAzure(source, "", phase, headers), /after a corrective retry/);
     assert.equal(calls, 2);
-    for (const choice of [
-      { finish_reason: "length", message: { content: '{"title":' } },
-      { finish_reason: "stop", message: { content: null, refusal: "Refused." } },
-    ]) {
+    for (const [choice, message] of [
+      [{ finish_reason: "stop", message: { content: null, refusal: "Refused." } }, /declined to summarize/],
+      [{ finish_reason: "content_filter", message: { content: null },
+        content_filter_results: { violence: { filtered: true, severity: "medium" }, hate: { filtered: false, severity: "safe" } } },
+      /content filter blocked part of the recap \(violence: medium\)/],
+    ] as const) {
       calls = 0;
       globalThis.fetch = async () => { calls++; return Response.json({ choices: [choice] }); };
-      await assert.rejects(callAzure(source, "", phase, headers), /refused, truncated/);
-      assert.equal(calls, 1);
+      await assert.rejects(callAzure(source, "", phase, headers), message);
+      assert.equal(calls, 1, "refusals and filtered output are not retried");
     }
+    // Truncation is retried once with a larger allowance, then reported specifically.
+    const allowances: number[] = [];
+    globalThis.fetch = async (_input, init = {}) => {
+      allowances.push(JSON.parse(String(init.body)).max_completion_tokens);
+      return Response.json({ choices: [{ finish_reason: "length", message: { content: '{"title":' } }] });
+    };
+    await assert.rejects(callAzure(source, "", phase, headers), /ran out of output space/);
+    assert.deepEqual(allowances, [config.openaiMaxCompletionTokens, Math.min(64000, config.openaiMaxCompletionTokens * 2)]);
+    calls = 0;
+    globalThis.fetch = async () => { calls++; return Response.json({ error: { code: "content_filter" } }, { status: 400 }); };
+    await assert.rejects(callAzure(source, "", phase, headers), /content filter blocked part of the recap \(input\)/);
+    assert.equal(calls, 1);
     calls = 0;
     globalThis.fetch = async () => { calls++; return new Response(null, { status: 400 }); };
     await assert.rejects(callAzure(source, "", phase, headers), /HTTP 400/);
