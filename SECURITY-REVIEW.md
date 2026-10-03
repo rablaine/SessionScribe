@@ -74,8 +74,14 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
     the private-network isolation of the previous design (about $60–80/month) for about $1–3/month.
   - Speech reads each temporary file through a 48-hour, read-only, single-blob SAS. The file is deleted after
     transcription, with a 3-day lifecycle rule as backup.
-  - **If the key leaks, recordings and transcripts in that account are readable.** Rotate it with
-    `az storage account keys renew`, then re-run `provision.ps1` (the share mount) and `deploy.ps1` (the app secret).- **Process privileges.** The container starts as root only long enough to make `/data` writable by `node`. It then drops to `node` via `setpriv` with no capabilities and `no_new_privs`. Account administration (`scribe-admin`) also runs as `node`.- **Images.** Built in ACR from an allowlisted `.dockerignore`, so `.env`, `.secrets/`, `data/` and `.private/` are never uploaded. The container runs as a non-root user (`node`).
+  - **If the key leaks, recordings and transcripts in that account are readable.** To rotate it:
+    1. Run `az storage account keys renew` for both keys.
+    2. Run `provision.ps1`, which updates the share mount.
+    3. Run `deploy.ps1`, which updates the app secret.
+    4. Restart the active revision.
+
+    The old replica loses its mount at step 1. It gives up its lock and exits, so expect a minute or two of
+    "starting" responses.- **Process privileges.** The container starts as root only long enough to make `/data` writable by `node`. It then drops to `node` via `setpriv` with no capabilities and `no_new_privs`. Account administration (`scribe-admin`) also runs as `node`.- **Images.** Built in ACR from an allowlisted `.dockerignore`, so `.env`, `.secrets/`, `data/` and `.private/` are never uploaded. The container runs as a non-root user (`node`).
 - **Deploys.** Manual only (`infra/deploy.ps1`). There is no CI/CD, no stored GitHub secrets, and nothing deploys on push.
 - **Backups.** Only the accounts database, kept for 14 days. Recordings and transcripts are not copied, so deletion and expiry are real.
 

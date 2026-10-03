@@ -31,6 +31,7 @@ export class InstanceLock {
   private readonly host: string;
   private timer?: NodeJS.Timeout;
   private held = false;
+  private lastHeartbeat = 0;
 
   constructor(directory: string, private options: InstanceLockOptions = {}) {
     this.file = path.join(directory, ".instance.lock");
@@ -66,6 +67,7 @@ export class InstanceLock {
       await delay(this.pollMs);
     }
     this.held = true;
+    this.lastHeartbeat = Date.now();
     this.timer = setInterval(() => void this.heartbeat(), this.heartbeatMs);
   }
 
@@ -78,8 +80,18 @@ export class InstanceLock {
       this.options.onLost?.();
       return;
     }
-    try { await this.write(); }
-    catch (error) { this.options.log?.(`Instance lock heartbeat failed: ${error instanceof Error ? error.message : error}`); }
+    try {
+      await this.write();
+      this.lastHeartbeat = Date.now();
+    } catch (error) {
+      this.options.log?.(`Instance lock heartbeat failed: ${error instanceof Error ? error.message : error}`);
+      // Once our heartbeat looks stale to others, another instance may take over: stop writing immediately.
+      if (Date.now() - this.lastHeartbeat > this.staleMs - this.heartbeatMs) {
+        this.held = false;
+        if (this.timer) clearInterval(this.timer);
+        this.options.onLost?.();
+      }
+    }
   }
 
   async release() {

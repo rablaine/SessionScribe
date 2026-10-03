@@ -99,6 +99,15 @@ az containerapp exec -g <rg> -n session-scribe --command "scribe-admin delete-us
 - Sessions are rate-limited (HTTP 429). Space calls about 20 seconds apart.
 - Do not try to transfer files through `exec`.
 
+Rotate the storage key (only after suspected exposure; causes a short outage):
+1. `az storage account keys renew` for `primary` and `secondary` in the storage subscription.
+2. `.\infra\provision.ps1`, which re-sets the environment's SMB mount key.
+3. `.\infra\deploy.ps1 -SkipBuild -Tag <current tag>`, which updates the app secret.
+4. `az containerapp revision restart`.
+
+Never put the key on a command line that the CLI might echo. Read it inside scripts, as `provision.ps1` and
+`deploy.ps1` do.
+
 Restore the accounts database from a daily backup:
 1. Copy the backup into place: `cp /data/backups/accounts-YYYY-MM-DD.sqlite /data/restore-accounts.sqlite`.
 2. Restart the active revision. On startup, the app swaps the file in once.

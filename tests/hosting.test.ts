@@ -256,3 +256,18 @@ test("a remembered device keeps signing in while strangers exhaust the account-w
     await rm(root, { recursive: true, force: true });
   }
 });
+test("instance lock: persistent heartbeat failures past the stale window give up the lock", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "scribe-lock-fail-"));
+  try {
+    let lost = false;
+    const lock = new InstanceLock(path.join(root, "data"), { host: "replica-x", staleMs: 120, heartbeatMs: 20, pollMs: 10, onLost: () => { lost = true; } });
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(path.join(root, "data"));
+    await lock.acquire();
+    await rm(path.join(root, "data"), { recursive: true, force: true });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(lost, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

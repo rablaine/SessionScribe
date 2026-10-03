@@ -33,7 +33,7 @@ await mkdir(config.dataDir, { recursive: true });
 const lock = new InstanceLock(config.dataDir, {
   log: message => console.log(message),
   onLost: () => {
-    console.error("Another instance took over the data directory. Exiting to avoid concurrent writes.");
+    console.error("Lost the data directory lock (another instance took over or storage is unreachable). Exiting to avoid concurrent writes.");
     process.exit(1);
   },
 });
@@ -103,6 +103,8 @@ async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`${signal} received; stopping new work and releasing the data directory.`);
+  // Storage can hang (e.g. a broken network mount); never outlive the platform's grace period.
+  setTimeout(() => process.exit(0), 25_000).unref();
   runner.stop();
   retention.stop();
   backups.stop();
