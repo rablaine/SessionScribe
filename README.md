@@ -23,8 +23,9 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
 - **Recap resilience.** Model failures are reported specifically: content filter (with category), truncation, which is
   retried once with a larger allowance, or refusal. A transcript slice that the content filter blocks is skipped and
   listed in the recap's uncertainties with its time range, instead of failing the whole recap. `provision.ps1` gives
-  the recap deployment a custom content filter that blocks only **high**-severity violence, so fantasy combat isn't
-  filtered. Other categories keep their defaults.
+  the recap deployment a custom content filter that blocks violence and hate only at **High** severity, so fantasy combat
+  and in-group/self-deprecating table humor aren't filtered. Sexual, self-harm, jailbreak and protected-material filters
+  keep their defaults.
 - **Progress for long-running work.** Processing, recap regeneration and laughter re-runs show a checklist of steps
   (completed with durations, the current one, and what's next) and an estimated progress bar with time remaining.
   Estimates come from `DATA_DIR/stage-timings.json`, which learns each stage's fixed overhead and per-audio-minute

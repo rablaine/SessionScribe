@@ -106,15 +106,18 @@ foreach ($a in $assignments) {
     }
 }
 
-Write-Host "Recap content filter (fantasy violence): block only high-severity violence on the recap deployment"
-# D&D combat narration routinely rates "medium" violence, which the default filter blocks. This policy keeps every
-# other category at the default and applies only to this app's recap deployment. No approval is needed to raise a
-# threshold; only turning filters off requires one.
+Write-Host "Recap content filter: block only high-severity violence and hate on the recap deployment"
+# D&D combat narration routinely rates "medium" violence, and in-group/self-deprecating humor (e.g. queer players
+# joking about themselves) can rate "medium" hate; the default filter blocks both. This policy raises only those two
+# thresholds to High, keeps sexual/self-harm/jailbreak/protected-material at defaults, and applies only to this app's
+# recap deployment. No approval is needed to raise a threshold; only turning filters off requires one.
 $policyName = "session-scribe-fantasy-violence"
 $filters = @()
 foreach ($source in @("Prompt", "Completion")) {
-    $filters += @{ name = "Violence"; blocking = $true; enabled = $true; severityThreshold = "High"; source = $source }
-    foreach ($category in @("Hate", "Sexual", "Selfharm")) {
+    foreach ($category in @("Violence", "Hate")) {
+        $filters += @{ name = $category; blocking = $true; enabled = $true; severityThreshold = "High"; source = $source }
+    }
+    foreach ($category in @("Sexual", "Selfharm")) {
         $filters += @{ name = $category; blocking = $true; enabled = $true; severityThreshold = "Medium"; source = $source }
     }
 }
