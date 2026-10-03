@@ -288,13 +288,25 @@ It does not change unrelated apps, plans or model deployments.
 There is no CI/CD and nothing deploys on push. The build context is filtered by `.dockerignore`
 (an allowlist), so `.env`, `.secrets/`, `data/` and `.private/` never leave your machine.
 
+### Custom domain
+
+The app can be served on your own domain with a free, auto-renewing managed certificate:
+
+1. In your DNS, add `CNAME <sub> -> <app>.<environment default domain>`, plus `TXT asuid.<sub> -> <environment
+   customDomainVerificationId>` (`az containerapp env show ... --query properties.customDomainConfiguration`).
+   With Cloudflare, keep the CNAME **DNS only (grey cloud)**. Proxying blocks certificate validation and adds an extra
+   hop, which breaks `TRUST_PROXY=1` client-address handling.
+2. `az containerapp hostname add` and `az containerapp hostname bind --validation-method CNAME --environment <env>`.
+3. Set `app.customDomain` in `infra/deploy.local.json` and run `deploy.ps1`. `APP_PUBLIC_ORIGIN` becomes that domain,
+   the default `*.azurecontainerapps.io` host is then refused, and each deploy restates the binding so it isn't dropped.
+
 ### Account administration in the cloud
 
 Every command runs inside the container as the app user and prints a one-use link. No password is typed into a remote shell.
 
 ```powershell
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin bootstrap-link --email you@example.com"  # first admin (link valid 24 h)
-az containerapp exec -g <rg> -n session-scribe --command "scribe-admin reset-link --email you@example.com"      # lost password (1 h)
+az containerapp exec -g <rg> -n session-scribe --command "scribe-admin reset-link --email you@example.com"      # lost password (24 h)
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin invite --email friend@example.com"       # invitation (72 h)
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin open-invite"                             # invitation for any email (72 h)
 az containerapp exec -g <rg> -n session-scribe --command "scribe-admin delete-user --email someone@example.com" # session-free non-admin

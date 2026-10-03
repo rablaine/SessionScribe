@@ -35,7 +35,7 @@ const usage = `Usage:
   node dist/account-cli.js bootstrap-link --email you@example.com  create the first administrator and print a one-use link to set its password
   node dist/account-cli.js invite --email friend@example.com    whitelist an email and print a one-use invitation link
   node dist/account-cli.js open-invite                         print a one-use invitation that is not bound to an email
-  node dist/account-cli.js reset-link --email user@example.com  print a one-use password-reset link (works for the admin too)
+  node dist/account-cli.js reset-link --email user@example.com  print a one-use password-reset link, valid 24 h (works for the admin too)
   node dist/account-cli.js delete-user --email user@example.com remove a non-admin account that owns no sessions`;
 
 async function main() {
@@ -73,7 +73,9 @@ async function main() {
       process.stdout.write("Administrator created. Sign in through the application.\n");
     } else if (command === "invite" || command === "reset-link" || command === "bootstrap-link") {
       const link = command === "invite" ? accounts.operatorInvite(email) :
-        command === "bootstrap-link" ? await accounts.operatorBootstrapLink(email) : accounts.operatorResetLink(email);
+        command === "bootstrap-link" ? await accounts.operatorBootstrapLink(email) :
+          // Run by the server owner from a trusted shell, so a full day is reasonable (in-app resets stay 1 hour).
+          accounts.operatorResetLink(email, 24 * 60 * 60 * 1000);
       process.stdout.write(`One-use link (expires ${link.expiresAt}). Share it privately:\n${link.url}\n`);
     } else {
       accounts.operatorDeleteUser(email);

@@ -60,7 +60,18 @@ if (-not $SkipBuild) {
 $identity = AzRun identity show --subscription $sub -g $rg -n id-session-scribe -o json | Out-String | ConvertFrom-Json
 $storageKey = AzRun storage account keys list --subscription $st.subscriptionId -g $st.resourceGroup -n $st.accountName --query "[0].value" -o tsv
 $envInfo = AzRun containerapp env show --subscription $sub -g $rg -n $envName -o json | Out-String | ConvertFrom-Json
-$origin = if ($cfg.app.publicOrigin) { $cfg.app.publicOrigin } else { "https://$appName.$($envInfo.properties.defaultDomain)" }
+$customDomain = if ($cfg.app.PSObject.Properties.Name -contains "customDomain") { [string]$cfg.app.customDomain } else { "" }
+$origin = if ($cfg.app.publicOrigin) { $cfg.app.publicOrigin } elseif ($customDomain) { "https://$customDomain" } else { "https://$appName.$($envInfo.properties.defaultDomain)" }
+# The YAML below replaces the whole ingress, so an existing custom-domain binding must be restated or it is dropped.
+$customDomains = @()
+if ($customDomain) {
+    $certificate = AzRun containerapp env certificate list --subscription $sub -g $rg -n $envName --managed-certificates-only -o json |
+        Out-String | ConvertFrom-Json | Where-Object { $_.properties.subjectName -eq $customDomain } | Select-Object -First 1
+    if (-not $certificate) {
+        throw "No managed certificate for $customDomain yet. Bind it once with 'az containerapp hostname bind' (see README), then deploy."
+    }
+    $customDomains = @(@{ name = $customDomain; bindingType = "SniEnabled"; certificateId = $certificate.id })
+}
 
 $settings = [ordered]@{
     NODE_ENV = "production"
@@ -97,6 +108,7 @@ $spec = [ordered]@{
             activeRevisionsMode = "Single"
             ingress = [ordered]@{
                 external = $true; targetPort = 3000; transport = "http"; allowInsecure = $false
+                customDomains = $customDomains
                 traffic = @(@{ latestRevision = $true; weight = 100 })
             }
             registries = @(@{ server = $loginServer; identity = $identity.id })

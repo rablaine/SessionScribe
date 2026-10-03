@@ -79,6 +79,10 @@ Invariants:
 - `AZURE_STORAGE_GATEWAY_*` stays blank in production.
 - The container starts as root only to fix `/data` ownership (`docker-entrypoint.sh`), then drops to `node` via
   `setpriv`. Shell scripts must keep LF line endings (`.gitattributes`; the Dockerfile also strips CRs).
+- Custom domain: `app.customDomain` in `deploy.local.json` (a managed certificate in the environment).
+  `deploy.ps1` restates the binding on every deploy, because the YAML replaces the whole ingress. DNS is a
+  **grey-cloud (DNS only)** Cloudflare CNAME; never proxy it (that breaks certificate renewal and `TRUST_PROXY=1`).
+  The app accepts only that host, so the default `*.azurecontainerapps.io` URL returns 403 by design.
 - Region: South Central US for the app environment and the storage account (next to the AI account). Container
   Apps environment creation failed in Central US for capacity reasons.
 ## Operating the hosted app
