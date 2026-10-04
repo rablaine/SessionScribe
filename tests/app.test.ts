@@ -181,7 +181,7 @@ test("per-user daily quotas stop repeated billable recaps and laughter runs", as
   const originalConfig = { ...config, quotas: { ...config.quotas } };
   Object.assign(config, {
     openaiEndpoint: "https://fixture.openai.azure.com", openaiDeployment: "fixture", authMode: "azure-cli",
-    quotas: { ...config.quotas, recaps: 2, laughter: 1 },
+    quotas: { ...config.quotas, recaps: 100, laughter: 1 },
   });
   const f = await createSessionFixture("dnd-quota-test-");
   f.runner.enqueue = () => {};
@@ -189,11 +189,13 @@ test("per-user daily quotas stop repeated billable recaps and laughter runs", as
   f.runner.enqueueLaughter = () => {};
   try {
     const job = await f.save({ ...createDemo(), demo: false, audioRetained: true, durationMs: 10_000 });
-    assert.equal((await f.request(`${f.base}/api/jobs/${job.id}/recap`, { method: "POST" })).status, 202);
-    assert.equal((await f.request(`${f.base}/api/jobs/${job.id}/recap`, { method: "POST" })).status, 202);
+    for (let recap = 1; recap <= 100; recap++) {
+      assert.equal((await f.request(`${f.base}/api/jobs/${job.id}/recap`, { method: "POST" })).status, 202,
+        `recap ${recap} is within the daily allowance`);
+    }
     const limited = await f.request(`${f.base}/api/jobs/${job.id}/recap`, { method: "POST" });
     assert.equal(limited.status, 429);
-    assert.match((await limited.json()).error, /Daily recap limit/);
+    assert.match((await limited.json()).error, /Daily recap limit reached \(100 per 24 hours\)/);
     assert.equal((await f.request(`${f.base}/api/jobs/${job.id}/laughter`, { method: "POST" })).status, 202);
     assert.equal((await f.request(`${f.base}/api/jobs/${job.id}/laughter`, { method: "POST" })).status, 429);
   } finally {

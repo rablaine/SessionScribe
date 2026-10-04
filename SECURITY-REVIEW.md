@@ -1,6 +1,6 @@
 # Security review: Session Scribe
 
-**Last updated:** 2026-10-03
+**Last updated:** 2026-10-04
 **Scope:** The whole codebase (`src/`, `public/`, `detector/`, `infra/`, `Dockerfile`), its git history, and the hosted Azure Container Apps design.
 **Threat model:** The source is public. The app runs on the owner's Azure subscription for a few invited friends. The main risks are:
 - someone getting past the invitation/allowlist gate;
@@ -41,6 +41,11 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
 
 ## 2. Public-hosting controls (verified by tests in `tests/hosting.test.ts`)
 
+- **Recap cost allowance (owner request, 2026-10-04).** The default recap quota is 100 per user per rolling
+  24 hours, shared with AI name checks and configurable with `DAILY_RECAPS_PER_USER`. This intentionally
+  raises the maximum billable allowance from 30; authentication, ownership, quota accounting, transcript
+  limits, and the other daily quotas are unchanged. Regression tests cover the default, environment
+  overrides, and rejection of the 101st recap request.
 - **Host and origin.** When `APP_PUBLIC_ORIGIN` is set, only that exact host is served, and only that exact origin is accepted on state-changing requests. Invitation and reset links are built from the configured origin, never from the Host header. Binding to a non-loopback `HOST` without `APP_PUBLIC_ORIGIN` refuses to start.
 - **Cookies.** `__Host-scribe_session`, with `Secure`, `HttpOnly`, `SameSite=Strict` and `Path=/`, and no Domain attribute.
 - **Response headers.** `Strict-Transport-Security: max-age=31536000`, a strict CSP (`script-src 'self'`, `frame-ancestors 'none'`, `form-action 'self'`), `X-Content-Type-Options`, `Referrer-Policy: no-referrer`, and `Cross-Origin-Opener-Policy`.
