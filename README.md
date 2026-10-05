@@ -79,6 +79,10 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
 
 **Public hosting is opt-in and exact.** With `APP_PUBLIC_ORIGIN` blank the server accepts only localhost Host headers. When it is set, only that exact HTTPS host is accepted, cookies become `Secure`/`__Host-`, HSTS is sent, and `TRUST_PROXY` must describe the real proxy chain (`1` on Container Apps, whose ingress appends the client address). Signup is invitation-only by default (`APP_OPEN_SIGNUP=false`). Per-user daily quotas cap uploads, audio hours, recap generations and laughter runs. Recap generations and AI name checks share a default limit of **100 per user per rolling 24 hours**, configurable with `DAILY_RECAPS_PER_USER`.
 
+The default audio allowance is **100 hours per user per rolling 24 hours**, configurable with
+`DAILY_AUDIO_HOURS_PER_USER`. The separate limits of 15 uploads per rolling 24 hours and 4 hours per
+recording are unchanged.
+
 **30-day recording retention is active.** Each original recording gets a fixed expiry 30 days after its upload was accepted (`RECORDING_RETENTION_DAYS`). Playback, waveforms, clip preview/export and laughter re-runs stop at that moment even before the background sweep physically deletes the file, which happens within about ten minutes. Transcripts, recaps, speaker names, laughter timestamps and saved clip ranges stay until the session is deleted. Sessions accepted before retention existed use their creation time as the upload time. The inspector shows days remaining, warns during the last 7 days, and offers **Download original**.
 
 ## Accounts and administrator setup

@@ -47,7 +47,7 @@ const env = z.object({
   APP_OPEN_SIGNUP: z.enum(["true", "false"]).default("false"),
   RECORDING_RETENTION_DAYS: z.coerce.number().int().min(0).max(3650).default(30),
   DAILY_UPLOADS_PER_USER: z.coerce.number().int().min(1).max(1000).default(15),
-  DAILY_AUDIO_HOURS_PER_USER: z.coerce.number().min(1).max(1000).default(24),
+  DAILY_AUDIO_HOURS_PER_USER: z.coerce.number().min(1).max(1000).default(100),
   DAILY_RECAPS_PER_USER: z.coerce.number().int().min(1).max(1000).default(100),
   DAILY_LAUGHTER_RUNS_PER_USER: z.coerce.number().int().min(1).max(1000).default(15),
   RECAP_MAX_TRANSCRIPT_CHARS: z.coerce.number().int().min(10_000).max(5_000_000).default(400_000),

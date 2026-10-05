@@ -100,6 +100,36 @@ async function fixture() {
   };
 }
 
+test("audio quota enforces exactly 100 hours per user in a rolling 24-hour window", async () => {
+  const f = await fixture();
+  const hourMs = 3_600_000;
+  const limit = 100 * hourMs;
+  const message = "Daily audio limit reached (100 hours per 24 hours).";
+  try {
+    const consume = (amount: number) => f.accounts.consumeQuota(f.user.id, "audio-ms", amount, limit, message);
+    consume(limit - 1);
+    consume(1);
+    assert.throws(() => consume(1), { status: 429, message });
+    assert.equal(f.accounts.usageSince(f.user.id, "audio-ms", Date.now() - 24 * hourMs), limit);
+
+    const second = await f.signup("second-audio@example.test");
+    f.accounts.consumeQuota(second.user.id, "audio-ms", hourMs, limit, message);
+    assert.equal(f.accounts.usageSince(second.user.id, "audio-ms", Date.now() - 24 * hourMs), hourMs);
+
+    const db = f.db();
+    try {
+      db.prepare("UPDATE usage SET createdAt=? WHERE userId=? AND kind=?")
+        .run(Date.now() - 24 * hourMs - 1000, f.user.id, "audio-ms");
+    } finally {
+      db.close();
+    }
+    consume(hourMs);
+    assert.equal(f.accounts.usageSince(f.user.id, "audio-ms", Date.now() - 24 * hourMs), hourMs);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("account session cookies, normalization, password policy, rotation, CSRF and logout", async () => {
   const f = await fixture();
   try {

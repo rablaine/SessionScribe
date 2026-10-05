@@ -1,6 +1,6 @@
 # Security review: Session Scribe
 
-**Last updated:** 2026-10-04
+**Last updated:** 2026-10-05
 **Scope:** The whole codebase (`src/`, `public/`, `detector/`, `infra/`, `Dockerfile`), its git history, and the hosted Azure Container Apps design.
 **Threat model:** The source is public. The app runs on the owner's Azure subscription for a few invited friends. The main risks are:
 - someone getting past the invitation/allowlist gate;
@@ -41,6 +41,11 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
 
 ## 2. Public-hosting controls (verified by tests in `tests/hosting.test.ts`)
 
+- **Audio cost allowance (owner request, 2026-10-05).** The default audio quota is 100 hours per user per
+  rolling 24 hours, configurable with `DAILY_AUDIO_HOURS_PER_USER`, up from 24. This intentionally raises
+  the billable audio allowance; upload count, per-recording duration, authentication, ownership, and
+  decoded-duration quota accounting are unchanged. Tests cover the default in milliseconds, explicit
+  overrides, the exact 100-hour boundary, per-user isolation, and rolling-window expiry.
 - **Recap cost allowance (owner request, 2026-10-04).** The default recap quota is 100 per user per rolling
   24 hours, shared with AI name checks and configurable with `DAILY_RECAPS_PER_USER`. This intentionally
   raises the maximum billable allowance from 30; authentication, ownership, quota accounting, transcript
