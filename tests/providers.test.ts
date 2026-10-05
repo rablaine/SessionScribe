@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { AzureSpeech } from "../src/azure.js";
 import { config } from "../src/config.js";
 import { createDemo } from "../src/demo.js";
-import { callAzure, generateRecap } from "../src/recap.js";
+import { callAzure, generateRecap, RecapModelError } from "../src/recap.js";
+import { callSuggestModel } from "../src/names.js";
 import { requestJson } from "../src/http.js";
 
 test("Azure wire contract: Entra bearer auth, plain blob URLs, isolated result SAS, recap and cleanup", async () => {
@@ -143,6 +144,65 @@ test("recap generation retries malformed prose once without requesting paragraph
   }
 });
 
+test("evocative episode-title guidance is final-pass only and leaves descriptive scene navigation intact", async () => {
+  const originalFetch = globalThis.fetch;
+  const prompts: string[] = [];
+  try {
+    globalThis.fetch = async (_input, init = {}) => {
+      const body = JSON.parse(String(init.body));
+      const prompt: string = body.messages[0].content;
+      prompts.push(prompt);
+      const extraction = /Extract at most 8/.test(prompt);
+      return Response.json({ choices: [{
+        finish_reason: "stop",
+        message: { content: JSON.stringify({
+          title: extraction ? "Reaching the silver tree" : "Silver at the Summit",
+          paragraphs: [{ text: "The party reaches the silver tree at the summit." }],
+          uncertainties: [],
+          ...(extraction ? { quotes: [] } : {}),
+        }) },
+      }] });
+    };
+    const headers = async () => ({ Authorization: "******" });
+    const source = JSON.stringify({ text: "The party reaches the silver tree at the summit." });
+    const scene = await callAzure(source, "", { final: false, level: 0 }, headers);
+    await callAzure(source, "", { final: false, level: 1 }, headers);
+    const episode = await callAzure(source, "", { final: true, level: 2 }, headers);
+    assert.equal(scene.title, "Reaching the silver tree");
+    assert.equal(episode.title, "Silver at the Summit");
+    for (const prompt of prompts) {
+      assert.match(prompt, /Nev and Nevermore are aliases for the same male participant; use he\/him pronouns/);
+      assert.match(prompt, /does not identify an anonymous speaker or establish the gender or actions of a character he plays/);
+      assert.match(prompt, /In narrative paragraphs and scene notes, keep romantic or sexual references non-graphic/);
+      assert.match(prompt, /not the separate verbatim out-of-context quote list/);
+      assert.match(prompt, /Preserve surrounding story events, meetings, identities, and relationship information/);
+      assert.match(prompt, /do not turn an expression of desire/);
+      assert.match(prompt, /infer reciprocation, or invent anyone's age/);
+    }
+    assert.match(prompts[0]!, /Do not exclude a quote solely for profanity, a sexual reference, or bawdy humor/);
+    assert.match(prompts[0]!, /Selected quotes must remain verbatim, never euphemized or rewritten/);
+    assert.doesNotMatch(prompts[0]!, /Omit an explicit remark from quotes|Skip.*sexually explicit remarks/);
+    assert.match(prompts[0]!, /short descriptive scene title/);
+    for (const prompt of prompts.slice(0, 2)) {
+      assert.doesNotMatch(prompt, /evocative episode title|Silver at the Summit|Bearing Burdens/);
+    }
+    const final = prompts[2]!;
+    assert.match(final, /usually 2-6 words/);
+    assert.match(final, /chapter heading rather than a plot summary/);
+    assert.match(final, /Silver at the Summit/);
+    assert.match(final, /Bearing Burdens/);
+    assert.match(final, /The Halls of Glacierhold/);
+    assert.match(final, /NOT facts or titles to copy/);
+    assert.match(final, /Do not string together highlights or proper nouns/);
+    assert.match(final, /do not force a pun or symbolism/);
+    assert.match(final, /identity and spelling are reliable/);
+    assert.match(final, /sparse or names are uncertain/);
+    assert.doesNotMatch(final, /short descriptive or playful title|incorporating the supplied session date/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("recap stops after two malformed responses and does not retry refusals or truncation as prose", async () => {
   const originalFetch = globalThis.fetch;
   const originalConfig = { ...config };
@@ -205,4 +265,119 @@ test("speech read URLs are read-only, HTTPS-only, single-blob SAS links that exp
   assert.equal(url.searchParams.get("sr"), "b");
   assert.equal(url.searchParams.get("se"), "2026-10-05T00:00:00Z");
   assert.ok(url.searchParams.get("sig"));
+});
+
+test("omitted model content is classified before recap and name-check output validation", async () => {
+  const originalFetch = globalThis.fetch;
+  const headers = async () => ({ Authorization: "******" });
+  const source = JSON.stringify({ id: "S00001", text: "The door opens." });
+  const phase = { final: true, level: 1 };
+  try {
+    for (const [choice, reason] of [
+      [{ finish_reason: "content_filter", message: {},
+        content_filter_results: { violence: { filtered: true, severity: "medium" } } }, "content_filter"],
+      [{ finish_reason: "stop", message: { refusal: "Refused." } }, "refusal"],
+      [{ finish_reason: "stop", message: {} }, "empty"],
+    ] as const) {
+      let calls = 0;
+      globalThis.fetch = async () => { calls++; return Response.json({ choices: [choice] }); };
+      await assert.rejects(callAzure(source, "", phase, headers), (error: unknown) => {
+        assert.ok(error instanceof RecapModelError);
+        assert.equal(error.reason, reason);
+        assert.deepEqual(error.categories, reason === "content_filter" ? ["violence: medium"] : []);
+        return true;
+      });
+      assert.equal(calls, 1);
+      if (reason === "empty") {
+        await assert.rejects(callSuggestModel(source, [], headers), /did not complete its response/);
+      } else {
+        assert.equal(await callSuggestModel(source, [], headers), "filtered");
+      }
+      assert.equal(calls, 2);
+    }
+
+    for (const caller of [
+      () => callAzure(source, "", phase, headers),
+      () => callSuggestModel(source, [], headers),
+    ]) {
+      const allowances: number[] = [];
+      globalThis.fetch = async (_input, init = {}) => {
+        allowances.push(JSON.parse(String(init.body)).max_completion_tokens);
+        return Response.json({ choices: [{ finish_reason: "length", message: {} }] });
+      };
+      await assert.rejects(caller(), /ran out of output space|did not complete its response/);
+      assert.deepEqual(allowances, [config.openaiMaxCompletionTokens, Math.min(64000, config.openaiMaxCompletionTokens * 2)]);
+      let calls = 0;
+      globalThis.fetch = async (_input, init = {}) => {
+        calls++;
+        const body = JSON.parse(String(init.body));
+        assert.equal(body.max_completion_tokens, calls === 1 ? config.openaiMaxCompletionTokens : Math.min(64000, config.openaiMaxCompletionTokens * 2));
+        const content = body.response_format.json_schema.name === "name_fixes"
+          ? { suggestions: [] }
+          : { title: "Recovered", paragraphs: [{ text: "The door opens." }], uncertainties: [] };
+        return Response.json({ choices: [{
+          finish_reason: calls === 1 ? "length" : "stop",
+          message: calls === 1 ? {} : { content: JSON.stringify(content) },
+        }] });
+      };
+      await caller();
+      assert.equal(calls, 2, "a successful retry recovers from truncation with omitted content");
+    }
+
+    // Do not loosen the contract for malformed envelopes or non-string content.
+    for (const choice of [
+      { finish_reason: "stop" },
+      { finish_reason: "stop", message: { content: 42 } },
+    ]) {
+      globalThis.fetch = async () => Response.json({ choices: [choice] });
+      await assert.rejects(callAzure(source, "", phase, headers), /invalid chat completion envelope/);
+      await assert.rejects(callSuggestModel(source, [], headers), /invalid chat completion envelope/);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Azure filtered slices with omitted content produce a recap with an explicit gap, not a schema failure", async () => {
+  const originalFetch = globalThis.fetch;
+  const job = { ...createDemo(), segments: [
+    { id: "S1", speaker: "speaker-1", startMs: 0, endMs: 1000, text: "Opening scene. ".repeat(1000) },
+    { id: "S2", speaker: "speaker-1", startMs: 1000, endMs: 2000, text: "Blocked scene. ".repeat(1000) },
+    { id: "S3", speaker: "speaker-1", startMs: 2000, endMs: 3000, text: "Ending scene. ".repeat(1000) },
+  ] };
+  let calls = 0;
+  try {
+    globalThis.fetch = async (_input, init = {}) => {
+      calls++;
+      const body = JSON.parse(String(init.body));
+      const { source } = JSON.parse(body.messages[1].content);
+      if (source.includes("Blocked scene.")) {
+        return Response.json({ choices: [{
+          finish_reason: "content_filter", message: {},
+          content_filter_results: { violence: { filtered: true, severity: "medium" } },
+        }] });
+      }
+      const extraction = /Extract at most 8/.test(body.messages[0].content);
+      return Response.json({ choices: [{
+        finish_reason: "stop", message: { content: JSON.stringify({
+          title: "The journey", paragraphs: [{ text: extraction ? "Supported scene notes." : "Supported story." }],
+          uncertainties: [], ...(extraction ? { quotes: [] } : {}),
+        }) },
+      }] });
+    };
+    const call = (source: string, context: string, phase: Parameters<typeof callAzure>[2]) =>
+      callAzure(source, context, phase, async () => ({ Authorization: "******" }));
+    const recap = await generateRecap(job, async () => {}, call);
+    assert.equal(calls, 4, "three scene calls plus final writing; filtered output is not retried");
+    assert.equal(recap.paragraphs[0]!.text, "Supported story.");
+    assert.deepEqual(recap.scenes.map(scene => scene.startMs), [0, 2000]);
+    assert.match(recap.uncertainties[0]!.text, /00:00:01.00:00:02 isn't included.*violence: medium/);
+
+    globalThis.fetch = async () => Response.json({ choices: [{
+      finish_reason: "content_filter", message: {},
+    }] });
+    await assert.rejects(generateRecap(job, async () => {}, call), /blocked every part.*transcript is preserved/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

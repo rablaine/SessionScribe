@@ -41,6 +41,13 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
 
 ## 2. Public-hosting controls (verified by tests in `tests/hosting.test.ts`)
 
+- **Model response handling and diagnostics (2026-10-05).** Recaps and AI name checks accept omitted/null
+  content only at the response-envelope boundary, then classify filtering, refusal, truncation, or empty
+  output before validating model JSON. Truncation retries remain bounded; content filters are not bypassed.
+  Correlated diagnostics record request IDs, status, timings, finish reason, safe filter categories, and
+  reported token counts, never transcripts, campaign context, clarifications, model prose/refusal text,
+  credentials, request bodies, or audio/SAS URLs. Malformed response errors are sanitized before persistence.
+  Provider, diagnostic-privacy, and runner tests cover recovery and preserving saved transcripts/recaps.
 - **Audio cost allowance (owner request, 2026-10-05).** The default audio quota is 100 hours per user per
   rolling 24 hours, configurable with `DAILY_AUDIO_HOURS_PER_USER`, up from 24. This intentionally raises
   the billable audio allowance; upload count, per-recording duration, authentication, ownership, and

@@ -7,7 +7,7 @@ import { StageTimings } from "./timings.js";
 import { generateRecap } from "./recap.js";
 import { JobStore } from "./store.js";
 import { LaughterDetector, type LaughterDetection } from "./laughter.js";
-import { applyNameList, callSuggestModel, suggestNameFixes, type NameEntry, type SuggestCaller } from "./names.js";
+import { applyNameList, suggestModel, suggestNameFixes, type NameEntry, type SuggestCaller } from "./names.js";
 
 export const activeStatuses = new Set(["queued", "normalizing", "uploading", "transcribing", "summarizing", "checking_names"]);
 export const activeLaughterStatuses = new Set(["queued", "running"]);
@@ -90,7 +90,7 @@ export class JobRunner {
     private speech = new AzureSpeech(),
     private recap = generateRecap,
     private laughter: LaughterDetection = new LaughterDetector(),
-    private suggestNames: SuggestCaller = callSuggestModel,
+    private suggestNames: SuggestCaller = suggestModel,
   ) {}
 
   enqueue(id: string) {

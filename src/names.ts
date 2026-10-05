@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { config } from "./config.js";
-import { AzureHttpError, requestJson } from "./http.js";
+import { AzureHttpError } from "./http.js";
 import { cognitiveHeaders } from "./auth.js";
 import { timestamp, type Job, type NameSuggestion, type NameSuggestions, type Segment } from "./domain.js";
 import { splitSources } from "./recap.js";
+import { requestChatCompletion } from "./chat-completion.js";
+import { logDiagnostic, type ModelContext } from "./diagnostics.js";
 
 // The account's names list: correct spellings and how speech recognition tends to mishear them.
 const nameText = z.string().trim().min(1).max(80).regex(/^[^\u0000-\u001f\u007f]*$/, "Names cannot contain control characters.");
@@ -134,21 +136,18 @@ const rawSuggestionsSchema = z.object({
   suggestions: z.array(z.object({ id: z.string(), before: z.string(), after: z.string(), name: z.string() })).max(100),
 });
 export type RawSuggestion = z.infer<typeof rawSuggestionsSchema>["suggestions"][number];
-export type SuggestCaller = (lines: string, names: NameEntry[]) => Promise<RawSuggestion[] | "filtered">;
+export type SuggestCaller = (lines: string, names: NameEntry[], diagnostics?: ModelContext) => Promise<RawSuggestion[] | "filtered">;
 
-const responseSchema = z.object({
-  choices: z.array(z.object({
-    finish_reason: z.string(),
-    message: z.object({ content: z.string().nullable(), refusal: z.string().nullable().optional() }),
-  })).min(1),
-});
+export const suggestModel: SuggestCaller = (lines, names, diagnostics) => callSuggestModel(lines, names, undefined, diagnostics);
 
-export async function callSuggestModel(lines: string, names: NameEntry[], headers = cognitiveHeaders): Promise<RawSuggestion[] | "filtered"> {
+export async function callSuggestModel(lines: string, names: NameEntry[], headers = cognitiveHeaders, context: ModelContext = {}): Promise<RawSuggestion[] | "filtered"> {
   let maxTokens = config.openaiMaxCompletionTokens;
   for (let attempt = 0; attempt < 2; attempt++) {
-    let response: unknown;
+    const callId = randomUUID();
+    const diagnostics: ModelContext = { ...context, operation: "names", phase: "name_check", modelAttempt: attempt + 1, maxCompletionTokens: maxTokens };
+    let choice: Awaited<ReturnType<typeof requestChatCompletion>>;
     try {
-      response = await requestJson(`${config.openaiEndpoint}/openai/v1/chat/completions`, {
+      choice = await requestChatCompletion({
         method: "POST",
         headers: { ...await headers(), "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -161,19 +160,24 @@ export async function callSuggestModel(lines: string, names: NameEntry[], header
           max_completion_tokens: maxTokens,
           ...(config.openaiReasoningEffort ? { reasoning_effort: config.openaiReasoningEffort } : {}),
         }),
-      });
+      }, diagnostics, callId);
     } catch (error) {
       if (error instanceof AzureHttpError && error.code === "content_filter") return "filtered";
       throw error;
     }
-    const choice = responseSchema.parse(response).choices[0]!;
     if (choice.finish_reason === "content_filter" || choice.message.refusal) return "filtered";
     if (choice.finish_reason === "length" && attempt === 0) { maxTokens = Math.min(64_000, maxTokens * 2); continue; }
     if (choice.finish_reason !== "stop" || !choice.message.content) {
       throw new Error("The name-checking model did not complete its response. Try again.");
     }
     try { return rawSuggestionsSchema.parse(JSON.parse(choice.message.content)).suggestions; }
-    catch { if (attempt === 0) continue; throw new Error("The name-checking model returned an unreadable response. Try again."); }
+    catch (error) {
+      if (!(error instanceof SyntaxError || error instanceof z.ZodError)) throw error;
+      logDiagnostic({ ...diagnostics, callId, event: attempt === 0 ? "model_validation_retry" : "model_validation_error",
+        errorKind: error instanceof SyntaxError ? "invalid_json" : "invalid_schema" });
+      if (attempt === 0) continue;
+      throw new Error("The name-checking model returned an unreadable response. Try again.");
+    }
   }
   throw new Error("The name-checking model ran out of output space. Try again.");
 }
@@ -185,7 +189,7 @@ export async function suggestNameFixes(
   job: Job,
   names: NameEntry[],
   onProgress: (done: number, total: number) => Promise<void>,
-  call: SuggestCaller = callSuggestModel,
+  call: SuggestCaller = suggestModel,
   signal?: AbortSignal,
 ): Promise<NameSuggestions> {
   if (!names.length) throw new Error("Add at least one name to your names list first.");
@@ -199,13 +203,15 @@ export async function suggestNameFixes(
   const seen = new Set<string>();
   let done = 0;
   let next = 0;
+  const diagnostics = { sessionId: job.id, runId: randomUUID() };
   await onProgress(0, sources.length);
   const worker = async () => {
     while (next < sources.length) {
       if (signal?.aborted) return;
-      const source = sources[next++]!;
+      const index = next++;
+      const source = sources[index]!;
       const ids = source.split("\n").map(line => (JSON.parse(line) as { id: string }).id);
-      const result = await call(source, names);
+      const result = await call(source, names, { ...diagnostics, part: index + 1, parts: sources.length });
       if (result === "filtered") {
         const first = byId.get(ids[0]!)!, last = byId.get(ids.at(-1)!)!;
         skipped.push(`${timestamp(first.startMs)}\u2013${timestamp(last.endMs)}`);

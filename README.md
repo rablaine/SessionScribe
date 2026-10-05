@@ -17,11 +17,24 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
 - Jobs/transcripts persist as JSON under `DATA_DIR`. On restart, in-progress jobs resume; saved Azure job URLs are polled rather than resubmitted. An instance lock guarantees that only one process uses `DATA_DIR`; during a rolling deploy the new container waits for the old one to release it.
 - Uploads are sent in resumable 8 MiB chunks (`/api/uploads`), so no request runs long enough to hit proxy timeouts and a dropped connection resumes from the last confirmed byte. Recordings are checked with ffprobe before a session is created; invalid files are deleted immediately.
 - Transcripts survive recap failures. Recaps can be retried independently.
+- All recap passes know that **Nev / Nevermore uses he/him pronouns**. This participant guidance does not
+  assign anonymous speaker labels or determine the pronouns of characters he plays.
+- Recaps keep romantic/sexual references non-graphic: brief explicit expressions of attraction are summarized
+  plainly while preserving surrounding meetings and relationships, without inventing encounters or reciprocation.
+  This prose guidance does not apply to the separate verbatim quote list: profanity, sexual references, and
+  bawdy humor are not excluded solely for being bawdy, and selected quotes are never euphemized.
+  Content filtering remains enabled;
+  this editorial guidance does not guarantee that a provider will accept every response.
+- **Episode titles** favor short, understated chapter headings that hint at an established image, place, or theme rather
+  than listing encounters and proper nouns. Grounded double meanings are welcome, not forced puns or invented symbolism.
+  Scene-navigation titles remain descriptive. The new style applies to future recaps and regeneration; saved titles
+  are not bulk-renamed.
 - **Bottom player skip controls:** ↺ 10 / 10 ↻ buttons (and Shift+←/→ outside text fields) jump 10 seconds in long recordings.
 - **Waveforms for long recordings** are built in the background. The clip editor shows "Analyzing…" and polls instead of
   holding a request open past proxy time limits, and waveforms are pre-built right after a processing run finishes.
 - **Recap resilience.** Model failures are reported specifically: content filter (with category), truncation, which is
-  retried once with a larger allowance, or refusal. A transcript slice that the content filter blocks is skipped and
+  retried once with a larger allowance, or refusal, including when Azure omits the response content. Recaps and AI name
+  checks classify these responses before validating the generated JSON. A transcript slice that the content filter blocks is skipped and
   listed in the recap's uncertainties with its time range, instead of failing the whole recap. `provision.ps1` gives
   the recap deployment a custom content filter that blocks violence and hate only at **High** severity, so fantasy combat
   and in-group/self-deprecating table humor aren't filtered. Sexual, self-harm, jailbreak and protected-material filters
@@ -348,6 +361,48 @@ It does not change unrelated apps, plans or model deployments.
 
 There is no CI/CD and nothing deploys on push. The build context is filtered by `.dockerignore`
 (an allowlist), so `.env`, `.secrets/`, `data/` and `.private/` never leave your machine.
+
+### Troubleshooting logs
+
+The hosted environment sends console output to Log Analytics; provisioning sets 30-day retention.
+Each recap/model name-check attempt emits a JSON diagnostic with `timestamp`, `event`, `sessionId`,
+`runId` (one per generation/check), `callId` (one per model attempt), `operation`, `phase`, `part`/`parts`,
+`modelAttempt`, and `maxCompletionTokens`. Model responses include HTTP status, Azure request ID when
+provided, elapsed milliseconds, finish reason, refusal/content-presence flags, filtered categories/severity,
+and prompt/completion/reasoning token counts when provided. `model_response` describes the provider response,
+not successful validation of its generated prose; `model_validation_retry`/`model_validation_error` identify
+invalid JSON or schema. `model_error` identifies transport, HTTP, or envelope failures.
+
+HTTP 429/5xx retries emit `azure_http_retry` with the HTTP attempt and delay; terminal HTTP/network/timeout
+failures emit `azure_http_error`. Model HTTP events share their model attempt's correlation fields.
+Other Azure HTTP calls have a `callId` but may not have a session/run ID. Stage durations and worker failures
+remain human-readable session-tagged logs. These diagnostics do not record transcripts, titles, campaign
+context, clarifications, model prose/refusal text, credentials, request bodies, or audio/SAS URLs.
+Model validation errors are summarized without echoing model output.
+
+For recent container output:
+
+```powershell
+az containerapp logs show --subscription <app-subscription> -g <resource-group> -n session-scribe --type console --tail 100
+```
+
+For historical investigation, run this in the Log Analytics workspace, substituting the session UUID
+(the ID in the session API/exports):
+
+```kusto
+ContainerAppConsoleLogs_CL
+| where ContainerAppName_s == "session-scribe"
+| where Log_s contains "<session UUID>"
+| extend diagnostic = parse_json(Log_s)
+| project TimeGenerated, RevisionName_s, Log_s,
+    event = tostring(diagnostic.event), runId = tostring(diagnostic.runId),
+    callId = tostring(diagnostic.callId), requestId = tostring(diagnostic.requestId)
+| order by TimeGenerated asc
+```
+
+Use `runId` to separate regenerations and `callId` to connect retries/responses/validation failures.
+Retain the Azure request ID and timestamp for provider support. Missing fields mean the provider did not
+supply them or the event was recorded before a response arrived; no token counts are estimated.
 
 ### Custom domain
 

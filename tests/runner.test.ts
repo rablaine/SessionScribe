@@ -11,6 +11,7 @@ import { createDemo } from "../src/demo.js";
 import { type Job } from "../src/domain.js";
 import { JobRunner, recapFraction } from "../src/runner.js";
 import { StageTimings } from "../src/timings.js";
+import { RecapModelError } from "../src/recap.js";
 import { JobStore } from "../src/store.js";
 import type { LaughterDetection } from "../src/laughter.js";
 
@@ -312,7 +313,15 @@ test("sessions run side by side: a long Azure wait doesn't block a short session
         return { schemaVersion: 1, model: "yamnet", modelVersion: "1", profileVersion: "test", events: [] };
       },
     };
-    const runner = new JobRunner(store, new GatedSpeech(), async () => createDemo().recap!, trackingLaughter);
+    let failRegeneration = true;
+    const runner = new JobRunner(store, new GatedSpeech(), async job => {
+      if (job.title === "regenerate") {
+        assert.equal(job.clarifications[0]!.text, "Mira cast the ward.");
+        if (failRegeneration) throw new RecapModelError("content_filter", ["violence: medium"]);
+        return { ...job.recap!, title: "Regenerated with clarifications" };
+      }
+      return createDemo().recap!;
+    }, trackingLaughter);
     const make = async (title: string) => {
       const job = await store.save({ ...createDemo(), demo: false, title, status: "queued" as const, segments: [], recap: undefined,
         audioRetained: true, laughter: { status: "pending" as const, events: [] } });
@@ -329,6 +338,26 @@ test("sessions run side by side: a long Azure wait doesn't block a short session
     assert.equal(runner.busyIds.has(long.id), true);
     assert.equal(store.get(long.id)!.laughter.status, "completed", "laughter ran during the Azure wait");
     assert.equal(laughterDuringLongWait, true);
+    const regenerate = await store.save({
+      ...createDemo(), demo: false, title: "regenerate", recapStale: true, status: "queued",
+      clarifications: [{ id: "c1", text: "Mira cast the ward.", createdAt: new Date().toISOString() }],
+    });
+    runner.enqueueRecap(regenerate.id);
+    await wait(runner, regenerate.id);
+    const failed = store.get(regenerate.id)!;
+    assert.equal(failed.status, "transcript_ready");
+    assert.match(failed.error!, /content filter.*violence: medium/);
+    assert.deepEqual(failed.recap, regenerate.recap);
+    assert.deepEqual(failed.segments, regenerate.segments);
+    assert.deepEqual(failed.clarifications, regenerate.clarifications);
+    assert.equal(failed.recapStale, true);
+    assert.equal(runner.busyIds.has(long.id), true, "recap failure does not stop another session");
+    failRegeneration = false;
+    runner.enqueueRecap(regenerate.id);
+    await wait(runner, regenerate.id);
+    assert.equal(store.get(regenerate.id)!.recap!.title, "Regenerated with clarifications");
+    assert.equal(store.get(regenerate.id)!.recapStale, false);
+    assert.deepEqual(store.get(regenerate.id)!.clarifications, regenerate.clarifications);
     releaseLong();
     await wait(runner, long.id);
     assert.equal(store.get(long.id)!.status, "completed");
