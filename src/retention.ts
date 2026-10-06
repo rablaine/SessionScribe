@@ -2,6 +2,7 @@ import { rm } from "node:fs/promises";
 import path from "node:path";
 import { recordingExpiry, type Job } from "./domain.js";
 import type { JobStore } from "./store.js";
+import { removePlaybackTemporaries } from "./playback.js";
 
 export interface RetentionOptions {
   retentionDays: number;
@@ -57,7 +58,8 @@ export class RetentionSweeper {
 
 export async function purgeRecordingFiles(store: JobStore, id: string) {
   const directory = store.directory(id);
-  for (const file of [store.audioPath(id), store.monoPath(id), path.join(directory, "waveform-v1.bin")]) {
+  await removePlaybackTemporaries(store.playbackPath(id));
+  for (const file of [store.audioPath(id), store.monoPath(id), store.playbackPath(id), path.join(directory, "waveform-v1.bin")]) {
     await rm(file, { force: true });
   }
 }

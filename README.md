@@ -17,6 +17,12 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
 - Jobs/transcripts persist as JSON under `DATA_DIR`. On restart, in-progress jobs resume; saved Azure job URLs are polled rather than resubmitted. An instance lock guarantees that only one process uses `DATA_DIR`; during a rolling deploy the new container waits for the old one to release it.
 - Uploads are sent in resumable 8 MiB chunks (`/api/uploads`), so no request runs long enough to hit proxy timeouts and a dropped connection resumes from the last confirmed byte. Recordings are checked with ffprobe before a session is created; invalid files are deleted immediately.
 - Transcripts survive recap failures. Recaps can be retried independently.
+- MP3 playback uses a lossless, indexed copy so variable-bitrate recordings with missing seek metadata do
+  not drift when clicking timestamps or previewing clips. The copy is prepared in the background on first
+  playback and reused by both players; it adds recording-sized storage but does not re-encode, level, or
+  stretch the audio. MP3 gapless decoder padding can differ by milliseconds, not a growing timestamp offset.
+  Original downloads and clip exports still use the untouched original. Opus playback is
+  unchanged. Indexed copies expire with their original recordings and are removed on session deletion.
 - All recap passes know that **Nev / Nevermore uses he/him pronouns**. This participant guidance does not
   assign anonymous speaker labels or determine the pronouns of characters he plays.
 - Recaps keep romantic/sexual references non-graphic: brief explicit expressions of attraction are summarized

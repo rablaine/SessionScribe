@@ -36,6 +36,7 @@ export class JobStore {
   // Retain the historical filename for persisted jobs; ffprobe detects the actual container.
   audioPath(id: string) { return path.join(this.directory(id), "original.mp3"); }
   monoPath(id: string) { return path.join(this.directory(id), "mono.mp3"); }
+  playbackPath(id: string) { return path.join(this.directory(id), "playback-v1.mp3"); }
 
   async init() {
     await mkdir(this.root, { recursive: true });

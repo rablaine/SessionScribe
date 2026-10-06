@@ -123,6 +123,7 @@ async function shutdown(signal: string) {
   server.close();
   const deadline = Date.now() + 20_000;
   while (runner.inCriticalSection && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 250));
+  await (app.locals.stopPlayback as () => Promise<void>)();
   try { accounts.close(); } catch { /* already closed */ }
   await lock.release().catch(() => {});
   process.exit(0);

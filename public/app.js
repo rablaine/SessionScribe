@@ -42,12 +42,21 @@ function updatePlayer(job) {
   pendingSeek = null;
   audioFailed = false;
   const player = $("recording-player");
+  window.SessionScribePlayback.clear(player);
   player.pause();
   if (job?.audioRetained) {
-    player.src = `/api/jobs/${job.id}/audio`;
     player.hidden = false;
     $("skip-back").hidden = $("skip-forward").hidden = false;
     $("audio-playback-status").textContent = "Timestamps seek the recording without starting playback.";
+    void window.SessionScribePlayback.load(player, job.id, text => {
+      $("audio-playback-status").textContent = text;
+    }).then(() => {
+      if (key === audioKey) $("audio-playback-status").textContent = "Timestamps seek the recording without starting playback.";
+    }).catch(cause => {
+      if (cause.name === "AbortError" || key !== audioKey) return;
+      audioFailed = true;
+      $("audio-playback-status").textContent = `Playback unavailable: ${cause.message}`;
+    });
   } else {
     player.removeAttribute("src");
     player.hidden = true;
@@ -58,7 +67,7 @@ function updatePlayer(job) {
         "This recording was removed after its retention period. The transcript and recap are still available." :
         "Playback unavailable. Older recordings were already deleted; reupload the original to play it.";
   }
-  player.load();
+  if (!job?.audioRetained) player.load();
   $("audio-player-title").textContent = job ? `Original recording · ${job.title}` : "";
 }
 

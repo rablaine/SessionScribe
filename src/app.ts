@@ -15,6 +15,7 @@ import { uploadErrorStatus, Uploads } from "./uploads.js";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { Waveforms } from "./waveform.js";
+import { PlaybackAudio } from "./playback.js";
 import { registerNameRoutes } from "./name-routes.js";
 
 const publicDirectory = fileURLToPath(new URL("../public/", import.meta.url));
@@ -75,6 +76,37 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     next();
   });
   const waveforms = new Waveforms(config.ffmpeg);
+  const playback = new PlaybackAudio(config.ffmpeg, config.minFreeDiskBytes);
+  app.get("/api/jobs/:id/playback", async (req, res) => {
+    const job = store.get(req.params.id!);
+    if (!job) { res.status(404).json({ error: "Session not found." }); return; }
+    if (!recordingAvailable(job)) {
+      res.status(410).json({ error: "The recording is no longer available for playback." }); return;
+    }
+    const mp3 = recordingFormat(job.originalName) === "mp3";
+    let ready: boolean;
+    try {
+      if (!mp3) await stat(store.audioPath(job.id));
+      ready = !mp3 || await playback.prepare(job.id, store.audioPath(job.id), store.playbackPath(job.id));
+    } catch (error) {
+      console.error(`Playback preparation request for session ${job.id} failed: ${error instanceof Error ? error.message : error}`);
+      const busy = error instanceof Error && "status" in error && error.status === 429;
+      const full = error instanceof Error && "status" in error && error.status === 507;
+      res.status(busy ? 429 : full ? 507 : 500).json({ error: busy
+        ? "Playback preparation is busy. Try again shortly."
+        : full ? "There is not enough free storage for accurate playback. Try again later or download the original."
+        : "Could not prepare accurate playback. Try again or download the original recording." });
+      return;
+    }
+    if (!accounts.isActiveUser(accounts.userId(req)) || !accounts.ownsJob(accounts.userId(req), job.id) ||
+        store.get(job.id)?.deleteRequested) {
+      res.status(404).json({ error: "Session no longer available." }); return;
+    }
+    if (!ready) {
+      res.status(202).set("Retry-After", "3").json({ status: "generating" }); return;
+    }
+    res.json({ status: "ready", url: `/api/jobs/${job.id}/audio${mp3 ? "?indexed=1" : ""}` });
+  });
   app.get("/api/jobs/:id/waveform", async (req, res) => {
     const job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
@@ -107,7 +139,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
     res.set("Cache-Control", "no-store").json(publicJob(job));
   });
-  app.get("/api/jobs/:id/audio", (req, res, next) => {
+  app.get("/api/jobs/:id/audio", async (req, res, next) => {
     const job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
     if (!recordingAvailable(job)) {
@@ -118,12 +150,21 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       return;
     }
     res.set("Cache-Control", "no-store");
+    const indexed = req.query.indexed === "1" && req.query.download !== "1" && recordingFormat(job.originalName) === "mp3";
+    const file = indexed ? store.playbackPath(job.id) : store.audioPath(job.id);
+    if (indexed && !await playback.prepare(job.id, store.audioPath(job.id), file)) {
+      res.status(409).json({ error: "Accurate playback is still being prepared. Try again shortly." }); return;
+    }
+    if (!accounts.isActiveUser(accounts.userId(req)) || !accounts.ownsJob(accounts.userId(req), job.id) ||
+        store.get(job.id)?.deleteRequested) {
+      res.status(404).json({ error: "Session no longer available." }); return;
+    }
     res.type(recordingFormat(job.originalName) === "opus" ? "audio/ogg" : "audio/mpeg");
     if (req.query.download === "1") {
       const extension = recordingFormat(job.originalName) === "opus" ? path.extname(job.originalName).toLowerCase() : ".mp3";
       res.attachment(clipFilename(job.title || "recording", job.id).replace(/\.mp3$/, extension));
     }
-    res.sendFile(path.resolve(store.audioPath(job.id)), { acceptRanges: true, cacheControl: false }, error => {
+    res.sendFile(path.resolve(file), { acceptRanges: true, cacheControl: false }, error => {
       // Players routinely cancel range requests while seeking; that is not a server error.
       if (error && !(error.message === "Request aborted" || "code" in error && error.code === "ECONNABORTED")) next(error);
     });
@@ -338,13 +379,14 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       if (warnings.length) throw Object.assign(new Error(warnings.join(" ")), { status: 502 });
     }
     await store.remove(job.id);
+    playback.forget(job.id);
     accounts.releaseJob(job.id);
   };
   // Completes a deletion requested while the session was busy, once its work has stopped.
   const finishDeletion = (id: string, attempt = 0): void => {
     const job = store.get(id);
     if (!job?.deleteRequested) return;
-    if (runner.busyIds.has(id) || exportingJobs.has(id) || waveforms.isGenerating(id)) {
+    if (runner.busyIds.has(id) || exportingJobs.has(id) || waveforms.isGenerating(id) || playback.isGenerating(id)) {
       if (attempt < 120) setTimeout(() => finishDeletion(id, attempt + 1), 5000).unref();
       return;
     }
@@ -357,7 +399,7 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
   app.delete("/api/jobs/:id", async (req, res) => {
     const job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
-    if (runner.busyIds.has(job.id) || exportingJobs.has(job.id) || waveforms.isGenerating(job.id)) {
+    if (runner.busyIds.has(job.id) || exportingJobs.has(job.id) || waveforms.isGenerating(job.id) || playback.isGenerating(job.id)) {
       // Accidental uploads can be deleted straight away: stop the work, then finish deleting in the background.
       await store.mutate(job.id, () => ({ deleteRequested: true, stage: "Deleting: stopping processing" }));
       runner.cancel(job.id);
@@ -399,7 +441,8 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     if (job && recordingAvailable(job) && job.durationMs) await waveforms.build(job.id, store.audioPath(job.id), job.durationMs);
   };
   app.locals.isRecordingBusy = (id: string) =>
-    runner.busyIds.has(id) || exportingJobs.has(id) || waveforms.isGenerating(id);
+    runner.busyIds.has(id) || exportingJobs.has(id) || waveforms.isGenerating(id) || playback.isGenerating(id);
+  app.locals.stopPlayback = () => playback.stop();
   app.locals.uploads = uploads;
   return app;
 }

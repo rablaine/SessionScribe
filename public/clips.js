@@ -371,6 +371,7 @@
   function close() { if (!busy) dialog.close(); }
   dialog.addEventListener("cancel", event => { if (busy) event.preventDefault(); });
   dialog.addEventListener("close", () => {
+    window.SessionScribePlayback.clear(player);
     cancelWaveform();
     finishDrag();
     player.pause();
@@ -443,8 +444,13 @@
     view = timeline.viewForRange($("clip-start").valueAsNumber * 1000, $("clip-end").valueAsNumber * 1000, Math.floor(job.durationMs));
     pendingPosition = Math.round($("clip-start").valueAsNumber * 1000);
     if (!dialog.open) dialog.showModal();
-    player.src = `/api/jobs/${job.id}/audio`;
-    player.load();
+    void window.SessionScribePlayback.load(player, job.id, text => {
+      $("clip-playback-status").textContent = text;
+    }).catch(cause => {
+      if (cause.name === "AbortError") return;
+      $("clip-playback-status").textContent = `Cannot preview: ${cause.message}`;
+      updateTransport();
+    });
     updateRange();
     $("clip-start-handle").focus();
   }
@@ -543,6 +549,7 @@
       if (!changed) { render(); return; }
       const version = ++generation;
       cancelWaveform();
+      window.SessionScribePlayback.clear(player);
       waveform = null;
       waveformCache.clear();
       waveformDrawKey = "";
