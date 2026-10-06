@@ -185,13 +185,14 @@
       </section>
     </main>
   </div>
-  <section id="audio-player-bar" class="audio-player-bar" aria-label="Original recording playback" hidden>
-    <div class="audio-details"><strong id="audio-player-title">Original recording</strong><p id="audio-playback-status" class="hint" role="status"></p></div>
+  <section id="audio-player-bar" class="audio-player-bar" aria-label="Recording playback" hidden>
+    <div class="audio-details"><strong id="audio-player-title">Recording</strong><p id="audio-playback-status" class="hint" role="status"></p></div>
     <div id="audio-controls" class="audio-controls">
       <button id="skip-back" class="quiet skip-button" type="button" aria-label="Back 10 seconds" title="Back 10 seconds (Shift+←)">&#x21BA; 10</button>
-      <audio id="recording-player" controls preload="metadata" aria-label="Play original session recording"></audio>
+      <audio id="recording-player" controls preload="metadata" aria-label="Play session recording"></audio>
       <button id="skip-forward" class="quiet skip-button" type="button" aria-label="Forward 10 seconds" title="Forward 10 seconds (Shift+→)">10 &#x21BB;</button>
       <button id="even-voices" class="quiet voice-toggle" type="button" aria-pressed="true" title="Boost quiet speakers and tame loud ones while listening. Also applies to exported clips."><span class="voice-toggle-state" aria-hidden="true"></span>Even out voices</button>
+      <button id="repair-playback" class="quiet compact" type="button" hidden title="Only if timestamps or clip previews jump to the wrong audio. Prepares a reusable playback copy; originals and exports stay unchanged.">Fix timestamp/clip timing</button>
     </div>
   </section>
   <dialog id="import-dialog" class="import-dialog" aria-labelledby="import-title" aria-describedby="import-description">
@@ -256,6 +257,7 @@
         <div class="clip-waveform-status"><p id="clip-waveform-status" class="hint" role="status"></p><button id="clip-waveform-retry" class="quiet compact" type="button" hidden>Retry waveform</button></div>
         <div class="clip-transport"><div class="clip-transport-actions"><button id="clip-preview" class="secondary compact" type="button" disabled>Play selection</button><button id="clip-replay" class="quiet compact" type="button" disabled>Replay from start</button><button id="clip-even-voices" class="quiet compact voice-toggle" type="button" aria-pressed="true" title="Boost quiet speakers and tame loud ones in the preview and the exported MP3."><span class="voice-toggle-state" aria-hidden="true"></span>Even out voices</button></div><output id="clip-position" aria-label="Clip playback position"></output></div>
         <p id="clip-playback-status" class="hint" role="status"></p>
+        <button id="clip-repair-playback" class="quiet compact" type="button" hidden title="Only if timestamps or clip previews jump to the wrong audio. Prepares a reusable playback copy; originals and exports stay unchanged.">Fix timestamp/clip timing</button>
         <audio id="clip-player" preload="metadata" hidden></audio>
       </section>
       <div class="field-row">

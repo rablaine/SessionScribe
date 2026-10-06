@@ -42,6 +42,8 @@ function updatePlayer(job) {
   pendingSeek = null;
   audioFailed = false;
   const player = $("recording-player");
+  $("repair-playback").hidden = !job?.audioRetained || !/\.mp3$/i.test(job.originalName);
+  $("repair-playback").disabled = false;
   window.SessionScribePlayback.clear(player);
   player.pause();
   if (job?.audioRetained) {
@@ -50,8 +52,12 @@ function updatePlayer(job) {
     $("audio-playback-status").textContent = "Timestamps seek the recording without starting playback.";
     void window.SessionScribePlayback.load(player, job.id, text => {
       $("audio-playback-status").textContent = text;
-    }).then(() => {
-      if (key === audioKey) $("audio-playback-status").textContent = "Timestamps seek the recording without starting playback.";
+    }).then(result => {
+      if (key !== audioKey) return;
+      $("repair-playback").disabled = result.url.includes("?playback=2");
+      $("audio-playback-status").textContent = result.url.includes("?playback=2")
+        ? "Timing fix ready. Timestamps seek without starting playback."
+        : "Timestamps seek without starting playback. If timing is wrong, use Fix timestamp/clip timing.";
     }).catch(cause => {
       if (cause.name === "AbortError" || key !== audioKey) return;
       audioFailed = true;
@@ -68,7 +74,7 @@ function updatePlayer(job) {
         "Playback unavailable. Older recordings were already deleted; reupload the original to play it.";
   }
   if (!job?.audioRetained) player.load();
-  $("audio-player-title").textContent = job ? `Original recording · ${job.title}` : "";
+  $("audio-player-title").textContent = job ? `Recording · ${job.title}` : "";
 }
 
 // Skip within the original recording; long sessions are hard to scrub precisely with the native slider.
@@ -83,6 +89,36 @@ window.SessionScribeAudio.attach($("recording-player"));
 window.SessionScribeAudio.bindToggle($("even-voices"));
 $("skip-back").addEventListener("click", () => skipPlayback(-10));
 $("skip-forward").addEventListener("click", () => skipPlayback(10));
+$("repair-playback").addEventListener("click", async () => {
+  if (!currentJob?.audioRetained) return;
+  const key = audioKey;
+  const player = $("recording-player");
+  const position = player.currentTime;
+  $("repair-playback").disabled = true;
+  try {
+    const result = await window.SessionScribePlayback.load(player, currentJob.id, text => {
+      if (key === audioKey) $("audio-playback-status").textContent = text;
+    }, true);
+    if (key !== audioKey || !result) return;
+    audioFailed = false;
+    pendingSeek = position;
+    if (player.readyState >= 1) applySeek(position);
+    $("audio-playback-status").textContent = "Timing fix ready. Check your clip boundaries before exporting.";
+  } catch (cause) {
+    if (cause.name !== "AbortError" && key === audioKey) {
+      $("audio-playback-status").textContent = `Timing fix failed: ${cause.message}`;
+    }
+  } finally {
+    if (key === audioKey) $("repair-playback").disabled = player.src.includes("?playback=2");
+  }
+});
+window.addEventListener("scribe-playback-repaired", event => {
+  if (event.detail.jobId !== currentJob?.id || event.detail.player === $("recording-player")) return;
+  const position = $("recording-player").currentTime;
+  audioKey = "";
+  updatePlayer(currentJob);
+  pendingSeek = position;
+});
 document.addEventListener("keydown", event => {
   if (!event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;

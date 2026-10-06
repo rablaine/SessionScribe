@@ -427,6 +427,35 @@
     if (player.paused) void playSelection();
     else player.pause();
   });
+  async function loadPreview(repair = false) {
+    const id = job.id;
+    const version = generation;
+    const button = $("clip-repair-playback");
+    button.hidden = !/\.mp3$/i.test(job.originalName);
+    button.disabled = true;
+    try {
+      const result = await window.SessionScribePlayback.load(player, id, text => {
+        $("clip-playback-status").textContent = text;
+      }, repair);
+      if (version !== generation || !dialog.open) return;
+      button.disabled = Boolean(result?.url.includes("?playback=2"));
+      if (repair && result) $("clip-playback-status").textContent = "Timing fix ready. Check your clip boundaries before exporting.";
+    } catch (cause) {
+      if (cause.name === "AbortError" || version !== generation || !dialog.open) return;
+      button.disabled = false;
+      $("clip-playback-status").textContent = `Cannot preview: ${cause.message}`;
+      updateTransport();
+    }
+  }
+  $("clip-repair-playback").addEventListener("click", () => {
+    pendingPosition = Math.round(player.currentTime * 1000);
+    void loadPreview(true);
+  });
+  window.addEventListener("scribe-playback-repaired", event => {
+    if (!dialog.open || event.detail.jobId !== job?.id || event.detail.player === player) return;
+    pendingPosition = Math.round(player.currentTime * 1000);
+    void loadPreview();
+  });
   function open(timestamp, existing = null) {
     if (!job?.audioRetained || !job.durationMs || busy) return;
     $("recording-player").pause();
@@ -444,13 +473,7 @@
     view = timeline.viewForRange($("clip-start").valueAsNumber * 1000, $("clip-end").valueAsNumber * 1000, Math.floor(job.durationMs));
     pendingPosition = Math.round($("clip-start").valueAsNumber * 1000);
     if (!dialog.open) dialog.showModal();
-    void window.SessionScribePlayback.load(player, job.id, text => {
-      $("clip-playback-status").textContent = text;
-    }).catch(cause => {
-      if (cause.name === "AbortError") return;
-      $("clip-playback-status").textContent = `Cannot preview: ${cause.message}`;
-      updateTransport();
-    });
+    void loadPreview();
     updateRange();
     $("clip-start-handle").focus();
   }

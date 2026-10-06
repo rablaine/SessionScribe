@@ -3,10 +3,20 @@ import { readdir, rename, rm, stat, statfs } from "node:fs/promises";
 import path from "node:path";
 import { runTool } from "./audio.js";
 
+// Four hours at 192 kbps, plus metadata/padding; never trust VBR source bytes to predict CBR size.
+export const MAX_PLAYBACK_BYTES = 4 * 60 * 60 * 24_000 + 1024 * 1024;
+const PLAYBACK_HEADROOM = 64 * 1024;
+
+export function validatePlaybackSize(size: number) {
+  if (size <= 0 || size >= MAX_PLAYBACK_BYTES - PLAYBACK_HEADROOM) {
+    throw new Error("Playback output is empty or exceeds its storage limit. The original recording is unchanged.");
+  }
+}
+
 export async function removePlaybackTemporaries(output: string) {
   const directory = path.dirname(output);
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (entry.isFile() && /^playback-v1\.mp3\.[0-9a-f-]{36}\.tmp$/.test(entry.name)) {
+    if (entry.isFile() && /^playback-v[12]\.mp3\.[0-9a-f-]{36}\.tmp$/.test(entry.name)) {
       await rm(path.join(directory, entry.name), { force: true });
     }
   }
@@ -74,24 +84,27 @@ export class PlaybackAudio {
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
     }
-    const reservation = source.size + 64 * 1024;
+    const reservation = MAX_PLAYBACK_BYTES + PLAYBACK_HEADROOM;
     this.reservedBytes += reservation;
     try {
       const disk = await statfs(path.dirname(output));
       if (disk.bavail * disk.bsize < this.reservedBytes + this.minFreeBytes) {
         throw Object.assign(new Error("There is not enough free storage for accurate playback. Try again later or download the original."), { status: 507 });
       }
-      await this.remux(input, output, signal);
+      await this.encode(input, output, signal);
     } finally { this.reservedBytes -= reservation; }
   }
 
-  private async remux(input: string, output: string, signal: AbortSignal) {
+  private async encode(input: string, output: string, signal: AbortSignal) {
     const temporary = `${output}.${randomUUID()}.tmp`;
     try {
-      // Rebuild the duration/seek index without decoding, filtering, or changing any audio frames.
       await runTool(this.executable, ["-nostdin", "-v", "error", "-y", "-i", input, "-map", "0:a:0",
-        "-codec:a", "copy", "-write_xing", "1", "-f", "mp3", temporary], 10 * 60_000, signal);
+        "-codec:a", "libmp3lame", "-b:a", "192k", "-threads", "1", "-write_xing", "1",
+        "-fs", String(MAX_PLAYBACK_BYTES), "-f", "mp3", temporary], 30 * 60_000, signal);
+      validatePlaybackSize((await stat(temporary)).size);
+      signal.throwIfAborted();
       await rename(temporary, output);
+      await rm(path.join(path.dirname(output), "playback-v1.mp3"), { force: true });
     } finally { await rm(temporary, { force: true }); }
   }
 }

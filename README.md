@@ -17,12 +17,19 @@ A private web app for recorded Dungeons & Dragons sessions. It runs locally for 
 - Jobs/transcripts persist as JSON under `DATA_DIR`. On restart, in-progress jobs resume; saved Azure job URLs are polled rather than resubmitted. An instance lock guarantees that only one process uses `DATA_DIR`; during a rolling deploy the new container waits for the old one to release it.
 - Uploads are sent in resumable 8 MiB chunks (`/api/uploads`), so no request runs long enough to hit proxy timeouts and a dropped connection resumes from the last confirmed byte. Recordings are checked with ffprobe before a session is created; invalid files are deleted immediately.
 - Transcripts survive recap failures. Recaps can be retried independently.
-- MP3 playback uses a lossless, indexed copy so variable-bitrate recordings with missing seek metadata do
-  not drift when clicking timestamps or previewing clips. The copy is prepared in the background on first
-  playback and reused by both players; it adds recording-sized storage but does not re-encode, level, or
-  stretch the audio. MP3 gapless decoder padding can differ by milliseconds, not a growing timestamp offset.
-  Original downloads and clip exports still use the untouched original. Opus playback is
-  unchanged. Indexed copies expire with their original recordings and are removed on session deletion.
+- Playback uses the original recording by default, with no automatic playback encoding. If timestamps or
+  clip previews jump to the wrong audio, choose **Fix timestamp/clip timing** in either player and confirm.
+  Only that session gets a 192 kbps constant-bitrate MP3 copy for reliable browser seeking, including VBR
+  files whose Xing index still produces inaccurate seeks. Both players reuse the playback-only lossy
+  conversion on future visits; the explicit request survives restarts. It does not level, trim, or stretch
+  audio, change saved clip ranges, or extend retention. Recheck clip boundaries after repair.
+  Preparation can take several minutes, with at most two single-threaded encoders and a 30-minute timeout.
+  Each task reserves about
+  331 MiB for the four-hour maximum, even for a small source, and rejects capped/empty output rather than
+  publishing a truncated copy. Actual cache storage is about 86 MB per audio hour.
+  Original downloads, transcription, and clip exports still use the untouched original; Opus playback is
+  unchanged. Version-2 caches replace old lossless caches on successful preparation. Both versions and
+  interrupted files expire with their recordings and are removed on session deletion.
 - All recap passes know that **Nev / Nevermore uses he/him pronouns**. This participant guidance does not
   assign anonymous speaker labels or determine the pronouns of characters he plays.
 - Recaps keep romantic/sexual references non-graphic: brief explicit expressions of attraction are summarized

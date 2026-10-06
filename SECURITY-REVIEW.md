@@ -41,11 +41,16 @@ No critical or high findings were raised in either review. `npm audit --omit=dev
 
 ## 2. Public-hosting controls (verified by tests in `tests/hosting.test.ts`)
 
-- **Indexed MP3 playback (2026-10-06).** Preparation and indexed audio stay behind active-account and
-  session-ownership checks, with access rechecked after asynchronous work. At most two remux tasks run,
-  each with a ten-minute timeout, disk-space reservation, and a temporary file atomically published on
-  success. Failures are surfaced; there is no silent fallback to inaccurate playback. Copies share the
-  original's retention/deletion lifecycle. Download/export audio and transcription remain unchanged.
+- **Constant-bitrate MP3 playback (2026-10-06).** Preparation and playback audio stay behind active-account
+  and session-ownership checks, with access rechecked after asynchronous work. Original playback does not
+  encode automatically; an owner must explicitly POST a CSRF-protected repair request. That opt-in is
+  persisted per session; unrequested corrected-audio URLs cannot start encoding. At most two single-threaded
+  encoders run, each with a 30-minute timeout and a four-hour/192 kbps disk reservation plus headroom.
+  FFmpeg output is byte-capped; empty or potentially truncated output is rejected before atomic publication.
+  Cancellation and failures clean up temporary output and never fall back silently to inaccurate playback.
+  Version-2 caches invalidate old lossless copies, which are removed after successful encoding. Both cache
+  versions and their temporary files share the original's retention/deletion lifecycle.
+  Download/export audio and transcription remain unchanged.
 - **Model response handling and diagnostics (2026-10-05).** Recaps and AI name checks accept omitted/null
   content only at the response-envelope boundary, then classify filtering, refusal, truncation, or empty
   output before validating model JSON. Truncation retries remain bounded; content filters are not bypassed.

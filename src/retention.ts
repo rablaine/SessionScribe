@@ -59,7 +59,8 @@ export class RetentionSweeper {
 export async function purgeRecordingFiles(store: JobStore, id: string) {
   const directory = store.directory(id);
   await removePlaybackTemporaries(store.playbackPath(id));
-  for (const file of [store.audioPath(id), store.monoPath(id), store.playbackPath(id), path.join(directory, "waveform-v1.bin")]) {
+  for (const file of [store.audioPath(id), store.monoPath(id), store.playbackPath(id),
+    path.join(directory, "playback-v1.mp3"), path.join(directory, "waveform-v1.bin")]) {
     await rm(file, { force: true });
   }
 }

@@ -128,6 +128,8 @@ test("retention: expiry is enforced at request time, purged by the sweeper, and 
       await writeFile(store.audioPath(job.id), "audio");
       await writeFile(store.playbackPath(job.id), "indexed-audio");
       await writeFile(`${store.playbackPath(job.id)}.00000000-0000-0000-0000-000000000001.tmp`, "interrupted-copy");
+      await writeFile(path.join(store.directory(job.id), "playback-v1.mp3"), "legacy-cache");
+      await writeFile(path.join(store.directory(job.id), "playback-v1.mp3.00000000-0000-0000-0000-000000000002.tmp"), "interrupted-remux");
       await writeFile(path.join(store.directory(job.id), "waveform-v1.bin"), "peaks");
     }
     const sweeper = new RetentionSweeper(store, { retentionDays: 30, isBusy: id => id === busy.id });
@@ -141,6 +143,8 @@ test("retention: expiry is enforced at request time, purged by the sweeper, and 
     await assert.rejects(readFile(store.audioPath(legacy.id)));
     await assert.rejects(readFile(store.playbackPath(legacy.id)));
     await assert.rejects(readFile(`${store.playbackPath(legacy.id)}.00000000-0000-0000-0000-000000000001.tmp`));
+    await assert.rejects(readFile(path.join(store.directory(legacy.id), "playback-v1.mp3")));
+    await assert.rejects(readFile(path.join(store.directory(legacy.id), "playback-v1.mp3.00000000-0000-0000-0000-000000000002.tmp")));
     await assert.rejects(readFile(path.join(store.directory(legacy.id), "waveform-v1.bin")));
 
     const kept = store.get(fresh.id)!;

@@ -144,6 +144,7 @@ export const jobSchema = z.object({
   title: z.string(),
   originalName: z.string(),
   audioRetained: z.boolean().default(false),
+  playbackRepairRequested: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   status: z.enum(["queued", "normalizing", "uploading", "transcribing", "summarizing", "checking_names", "transcript_ready", "completed", "failed"]),

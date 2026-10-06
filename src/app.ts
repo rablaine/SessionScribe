@@ -77,17 +77,26 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
   });
   const waveforms = new Waveforms(config.ffmpeg);
   const playback = new PlaybackAudio(config.ffmpeg, config.minFreeDiskBytes);
-  app.get("/api/jobs/:id/playback", async (req, res) => {
-    const job = store.get(req.params.id!);
+  app.route("/api/jobs/:id/playback").get(playbackStatus).post(playbackStatus);
+  async function playbackStatus(req: Request<{ id: string }>, res: Response) {
+    let job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
     if (!recordingAvailable(job)) {
       res.status(410).json({ error: "The recording is no longer available for playback." }); return;
     }
     const mp3 = recordingFormat(job.originalName) === "mp3";
+    const repair = req.method === "POST";
+    if (repair && !mp3) {
+      res.status(400).json({ error: "Timestamp repair is only available for MP3 recordings." }); return;
+    }
     let ready: boolean;
     try {
-      if (!mp3) await stat(store.audioPath(job.id));
-      ready = !mp3 || await playback.prepare(job.id, store.audioPath(job.id), store.playbackPath(job.id));
+      if (repair && !job.playbackRepairRequested) {
+        job = await store.mutate(job.id, () => ({ playbackRepairRequested: true }));
+      }
+      const corrected = mp3 && job.playbackRepairRequested;
+      if (!corrected) await stat(store.audioPath(job.id));
+      ready = !corrected || await playback.prepare(job.id, store.audioPath(job.id), store.playbackPath(job.id));
     } catch (error) {
       console.error(`Playback preparation request for session ${job.id} failed: ${error instanceof Error ? error.message : error}`);
       const busy = error instanceof Error && "status" in error && error.status === 429;
@@ -105,8 +114,8 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
     if (!ready) {
       res.status(202).set("Retry-After", "3").json({ status: "generating" }); return;
     }
-    res.json({ status: "ready", url: `/api/jobs/${job.id}/audio${mp3 ? "?indexed=1" : ""}` });
-  });
+    res.json({ status: "ready", url: `/api/jobs/${job.id}/audio${mp3 && job.playbackRepairRequested ? "?playback=2" : ""}` });
+  }
   app.get("/api/jobs/:id/waveform", async (req, res) => {
     const job = store.get(req.params.id!);
     if (!job) { res.status(404).json({ error: "Session not found." }); return; }
@@ -150,9 +159,14 @@ export function createApp(store: JobStore, runner: JobRunner, accounts: Accounts
       return;
     }
     res.set("Cache-Control", "no-store");
-    const indexed = req.query.indexed === "1" && req.query.download !== "1" && recordingFormat(job.originalName) === "mp3";
-    const file = indexed ? store.playbackPath(job.id) : store.audioPath(job.id);
-    if (indexed && !await playback.prepare(job.id, store.audioPath(job.id), file)) {
+    const requestedCopy = (req.query.playback === "2" || req.query.indexed === "1") &&
+      req.query.download !== "1" && recordingFormat(job.originalName) === "mp3";
+    if (req.query.playback === "2" && requestedCopy && !job.playbackRepairRequested) {
+      res.status(409).json({ error: "Use Fix timestamp/clip timing to request accurate playback first." }); return;
+    }
+    const prepared = requestedCopy && job.playbackRepairRequested;
+    const file = prepared ? store.playbackPath(job.id) : store.audioPath(job.id);
+    if (prepared && !await playback.prepare(job.id, store.audioPath(job.id), file)) {
       res.status(409).json({ error: "Accurate playback is still being prepared. Try again shortly." }); return;
     }
     if (!accounts.isActiveUser(accounts.userId(req)) || !accounts.ownsJob(accounts.userId(req), job.id) ||

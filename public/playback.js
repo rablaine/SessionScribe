@@ -19,7 +19,8 @@
       if (signal.aborted) abort();
     });
   }
-  async function load(player, jobId, onStatus) {
+  async function load(player, jobId, onStatus, repair = false) {
+    if (repair && !confirm("Fix timestamp/clip timing for this session? This prepares a playback-only copy and can take several minutes. It uses about 86 MB per audio hour until the recording expires. Originals, exports, and saved clip ranges stay unchanged.")) return null;
     clear(player);
     const controller = new AbortController();
     loads.set(player, controller);
@@ -28,21 +29,24 @@
     player.load();
     const endpoint = `/api/jobs/${jobId}/playback`;
     const started = Date.now();
+    let method = repair ? "POST" : "GET";
     try {
       for (;;) {
-        const result = await window.SessionScribeAuth.request(endpoint, { signal: controller.signal });
+        const result = await window.SessionScribeAuth.request(endpoint, { signal: controller.signal, method });
+        method = "GET";
         controller.signal.throwIfAborted();
         if (result?.status === "ready") {
-          if (![ `/api/jobs/${jobId}/audio`, `/api/jobs/${jobId}/audio?indexed=1` ].includes(result.url)) {
+          if (![ `/api/jobs/${jobId}/audio`, `/api/jobs/${jobId}/audio?playback=2` ].includes(result.url)) {
             throw new Error("The server returned an invalid playback URL.");
           }
           player.src = result.url;
           player.load();
-          return;
+          if (repair) window.dispatchEvent(new CustomEvent("scribe-playback-repaired", { detail: { jobId, player } }));
+          return result;
         }
         if (result?.status !== "generating") throw new Error("The server returned an invalid playback status.");
-        if (Date.now() - started > 11 * 60_000) throw new Error("Playback preparation took too long. Try again.");
-        onStatus("Preparing an accurate seek index for this recording...");
+        if (Date.now() - started > 31 * 60_000) throw new Error("Playback preparation took too long. Try again.");
+        onStatus("Preparing accurate playback for this recording. Long recordings can take several minutes...");
         await wait(controller.signal);
       }
     } finally {
